@@ -99,7 +99,7 @@ class ConstraintValidator:
         violations = []
 
         # Check if positions are reasonable (not too wide or too narrow)
-        for i, position in enumerate(positions):
+        for i, position in enumerate(strategy.positions):
             tick_width = position.tickUpper - position.tickLower
 
             # Extremely wide positions (> 10000 ticks) may have high IL
