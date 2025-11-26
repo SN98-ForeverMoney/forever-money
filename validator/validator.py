@@ -64,6 +64,57 @@ class SN98Validator:
 
         logger.info(f"Validator initialized with hotkey: {wallet.hotkey.ss58_address}")
 
+    def query_test_miner(
+        self,
+        request: ValidatorRequest,
+        test_miner_url: str,
+        timeout: int = 30
+    ) -> Optional[MinerResponse]:
+        """
+        Query a test miner directly (bypassing metagraph).
+
+        Args:
+            request: ValidatorRequest to send
+            test_miner_url: URL of the test miner (e.g., http://localhost:8000)
+            timeout: Request timeout in seconds
+
+        Returns:
+            MinerResponse or None if failed
+        """
+        url = f"{test_miner_url.rstrip('/')}/predict_strategy"
+
+        try:
+            logger.info(f"Querying test miner at {url}")
+
+            response = requests.post(
+                url,
+                json=request.model_dump(),
+                timeout=timeout,
+                headers={'Content-Type': 'application/json'}
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                miner_response = MinerResponse(**data)
+                logger.info(f"Received response from test miner")
+                return miner_response
+            else:
+                logger.warning(
+                    f"Test miner returned status {response.status_code}: "
+                    f"{response.text}"
+                )
+                return None
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"Test miner request timed out")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Error querying test miner: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error querying test miner: {e}")
+            return None
+
     def generate_round_request(
         self,
         pair_address: str,
@@ -113,7 +164,7 @@ class SN98Validator:
         self,
         miner_uid: int,
         request: ValidatorRequest,
-        timeout: int = 30
+        timeout: int = 5
     ) -> Optional[MinerResponse]:
         """
         Query a single miner for their strategy.
@@ -336,6 +387,14 @@ class SN98Validator:
         Args:
             scores: List of MinerScore objects
         """
+        # Check for dry-run mode
+        if self.config.get('dry_run', False):
+            logger.info("DRY-RUN: Skipping weight publishing to chain")
+            logger.info("DRY-RUN: Scores that would be published:")
+            for score in scores:
+                logger.info(f"  Miner {score.miner_uid}: {score.final_score:.4f}")
+            return
+
         # Prepare weights for setting
         weights = [0.0] * len(self.metagraph.uids)
 
@@ -420,8 +479,17 @@ class SN98Validator:
             mode=Mode.INVENTORY
         )
 
-        # 2. Poll miners
-        miner_responses = self.poll_miners(request)
+        # 2. Poll miners (or test miner if specified)
+        test_miner_url = self.config.get('test_miner')
+        if test_miner_url:
+            logger.info(f"Using test miner at {test_miner_url}")
+            response = self.query_test_miner(request, test_miner_url)
+            if response:
+                miner_responses = {-1: response}  # Use -1 as UID for test miner
+            else:
+                miner_responses = {}
+        else:
+            miner_responses = self.poll_miners(request)
 
         if not miner_responses:
             logger.warning("No valid miner responses received")

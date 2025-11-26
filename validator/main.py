@@ -41,14 +41,16 @@ def get_config():
     parser.add_argument('--pair_address', type=str, help='Trading pair address')
     parser.add_argument('--target_block', type=int, help='Target block for round')
     parser.add_argument('--start_block', type=int, help='Starting block for backtest')
+    parser.add_argument('--test-miner', type=str, help='Test with local miner at specified URL (e.g., http://localhost:8000)')
+    parser.add_argument('--dry-run', action='store_true', help='Run without publishing weights to the network')
 
     args = parser.parse_args()
 
     config = {
         'netuid': args.netuid,
-        'subtensor_network': args.subtensor_network,
-        'wallet_name': args.wallet_name,
-        'wallet_hotkey': args.wallet_hotkey,
+        'subtensor_network': getattr(args, 'subtensor.network'),
+        'wallet_name': getattr(args, 'wallet.name'),
+        'wallet_hotkey': getattr(args, 'wallet.hotkey'),
         'pair_address': args.pair_address or os.getenv('PAIR_ADDRESS'),
         'chain_id': int(os.getenv('CHAIN_ID', 8453)),
         'target_block': args.target_block,
@@ -60,6 +62,8 @@ def get_config():
         'lp_alignment_weight': float(os.getenv('LP_ALIGNMENT_WEIGHT', 0.3)),
         'top_n_strategies': int(os.getenv('TOP_N_STRATEGIES', 3)),
         'winning_strategy_file': os.getenv('WINNING_STRATEGY_FILE', 'winning_strategy.json'),
+        'test_miner': getattr(args, 'test_miner', None),
+        'dry_run': getattr(args, 'dry_run', False),
         'postgres_access': {
             'host': os.getenv('POSTGRES_HOST', 'localhost'),
             'port': int(os.getenv('POSTGRES_PORT', 5432)),
@@ -89,13 +93,18 @@ def main():
     logger.info(f"Netuid: {config['netuid']}")
 
     # Initialize database connection
-    db = PoolDataDB(
-        host=config['postgres_access']['host'],
-        port=config['postgres_access']['port'],
-        database=config['postgres_access']['database'],
-        user=config['postgres_access']['user'],
-        password=config['postgres_access']['password']
-    )
+    db_connection_string = os.getenv('DB_CONNECTION_STRING')
+    if db_connection_string:
+        logger.info("Using DB_CONNECTION_STRING for database connection")
+        db = PoolDataDB(connection_string=db_connection_string)
+    else:
+        db = PoolDataDB(
+            host=config['postgres_access']['host'],
+            port=config['postgres_access']['port'],
+            database=config['postgres_access']['database'],
+            user=config['postgres_access']['user'],
+            password=config['postgres_access']['password']
+        )
 
     # Initialize validator
     validator = SN98Validator(
