@@ -334,6 +334,7 @@ class SN98Validator:
 
                 if not perf_valid:
                     constraint_violations[uid].extend(perf_violations)
+                    logger.warning(f"Miner {uid} performance violations: {perf_violations}")
 
                 miner_metrics[uid] = metrics
 
@@ -341,7 +342,8 @@ class SN98Validator:
                     f"Miner {uid} metrics: "
                     f"PnL vs HODL={metrics.net_pnl_vs_hodl:.4f}, "
                     f"Fees={metrics.total_fees_collected:.4f}, "
-                    f"IL={metrics.impermanent_loss:.2%}"
+                    f"IL={metrics.impermanent_loss:.2%}, "
+                    f"Rebalances={metrics.num_rebalances}"
                 )
 
             except Exception as e:

@@ -2,7 +2,7 @@
 
 **Complete step-by-step guide from setup to successful validator registration**
 
-**Last Updated:** November 26, 2025
+**Last Updated:** November 27, 2025
 **Status:** ✅ Tested and Working
 **Network:** Bittensor Testnet (Subnet 98)
 
@@ -511,7 +511,29 @@ python -m validator.main \
   --dry-run
 ```
 
-### 4. Testing with Local Miner
+### 4. Running the Miner
+
+Start the miner server before running the validator:
+
+**Development Mode:**
+
+```bash
+source venv/bin/activate
+python -m miner.miner
+```
+
+**Production Mode (Recommended):**
+
+```bash
+source venv/bin/activate
+gunicorn -w 4 -b 0.0.0.0:8000 miner.miner:app
+```
+
+The miner will start on `http://localhost:8000` and expose:
+- `GET /health` - Health check endpoint
+- `POST /predict_strategy` - Strategy generation endpoint
+
+### 5. Testing with Local Miner
 
 To test with a local miner (bypassing metagraph lookup):
 
@@ -524,11 +546,11 @@ python -m validator.main \
   --pair_address 0x1024c20c048ea6087293f46d4a1c042cb6705924 \
   --target_block 38634763 \
   --start_block 35330091 \
-  --test-miner http://localhost:8091 \
+  --test-miner http://localhost:8000 \
   --dry-run
 ```
 
-### 5. Validator Flags Reference
+### 6. Validator Flags Reference
 
 | Flag                 | Description                                                           |
 | -------------------- | --------------------------------------------------------------------- |
