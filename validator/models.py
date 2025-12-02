@@ -127,3 +127,40 @@ class MinerScore(BaseModel):
         default_factory=list, description="List of constraint violations"
     )
     rank: Optional[int] = Field(None, description="Rank among all miners")
+
+
+class RebalanceRequest(BaseModel):
+    """
+    Request sent from Validator to Miner during backtesting to ask
+    whether the miner wants to rebalance at a specific block.
+
+    This enables Option 2 architecture: validators call miners during
+    backtest simulation to let miners make rebalance decisions based
+    on their own logic (ML models, external data, etc.)
+    """
+    block_number: int = Field(..., description="Current block number in simulation")
+    current_price: float = Field(..., description="Current price (token1/token0)")
+    current_positions: List[Position] = Field(..., description="Current LP positions")
+    pair_address: str = Field(..., description="Pool address")
+    chain_id: int = Field(8453, description="Chain ID")
+    round_id: str = Field(..., description="Round identifier for context")
+
+
+class RebalanceResponse(BaseModel):
+    """
+    Response from Miner indicating whether to rebalance and new positions.
+    """
+    rebalance: bool = Field(..., description="Whether to rebalance")
+    new_positions: Optional[List[Position]] = Field(
+        None, description="New positions if rebalancing (required if rebalance=True)"
+    )
+    reason: Optional[str] = Field(
+        None, description="Optional explanation for the decision"
+    )
+
+    @model_validator(mode='after')
+    def validate_positions_if_rebalance(self) -> 'RebalanceResponse':
+        """Ensure new_positions is provided when rebalance is True."""
+        if self.rebalance and (self.new_positions is None or len(self.new_positions) == 0):
+            raise ValueError("new_positions must be provided when rebalance is True")
+        return self

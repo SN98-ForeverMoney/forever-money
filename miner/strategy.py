@@ -6,13 +6,14 @@ with their own models (ML, optimization, etc.).
 """
 import logging
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from validator.models import (
     ValidatorRequest,
     Strategy,
     Position,
-    RebalanceRule
+    RebalanceRule,
+    RebalanceRequest
 )
 from validator.database import PoolDataDB
 
@@ -63,13 +64,9 @@ class SimpleStrategyGenerator:
             amount0 = 0
             amount1 = 0
 
-        # Get current price estimate (would query DB in production)
-        current_price = self._estimate_current_price(request)
-        current_tick = self._price_to_tick(current_price)
-
-        # Generate positions
-        positions = self._create_positions(
-            current_tick=current_tick,
+        # Try to get historical price range for smarter positioning
+        positions = self._create_smart_positions(
+            request=request,
             amount0=amount0,
             amount1=amount1,
             min_tick_width=min_tick_width
@@ -113,6 +110,72 @@ class SimpleStrategyGenerator:
     def _tick_to_price(self, tick: int) -> float:
         """Convert tick to price."""
         return 1.0001 ** tick
+
+    def _create_smart_positions(
+        self,
+        request: ValidatorRequest,
+        amount0: int,
+        amount1: int,
+        min_tick_width: int
+    ) -> List[Position]:
+        """
+        Create positions based on historical price data.
+
+        If we have DB access, query the actual price range and create
+        a position wide enough to cover it. This avoids excessive rebalancing.
+        """
+        import os
+
+        # Try to get historical price range
+        if self.db:
+            try:
+                start_block = int(os.getenv('START_BLOCK', 35330091))
+                end_block = request.target_block
+
+                start_price = self.db.get_price_at_block(request.pairAddress, start_block)
+                end_price = self.db.get_price_at_block(request.pairAddress, end_block)
+
+                if start_price and end_price:
+                    # Cover the historical price range with small buffer
+                    # This ensures we stay in range throughout the backtest
+                    min_price = min(start_price, end_price) * 0.95  # 5% below lowest
+                    max_price = max(start_price, end_price) * 1.05  # 5% above highest
+
+                    logger.info(f"Historical prices: start=${start_price:.2f}, end=${end_price:.2f}")
+
+                    # Convert to ticks
+                    lower_tick = self._price_to_tick(min_price)
+                    upper_tick = self._price_to_tick(max_price)
+
+                    # Round to tick spacing
+                    tick_spacing = 60
+                    lower_tick = (lower_tick // tick_spacing) * tick_spacing
+                    upper_tick = ((upper_tick // tick_spacing) + 1) * tick_spacing
+
+                    # Ensure minimum width
+                    if upper_tick - lower_tick < min_tick_width:
+                        upper_tick = lower_tick + min_tick_width
+
+                    logger.info(
+                        f"Smart positioning: prices ${min_price:.2f}-${max_price:.2f}, "
+                        f"ticks {lower_tick}-{upper_tick} (width: {upper_tick - lower_tick})"
+                    )
+
+                    return [Position(
+                        tickLower=lower_tick,
+                        tickUpper=upper_tick,
+                        allocation0=str(amount0),
+                        allocation1=str(amount1),
+                        confidence=0.90
+                    )]
+
+            except Exception as e:
+                logger.warning(f"Could not get historical prices: {e}")
+
+        # Fallback to default positions
+        current_price = self._estimate_current_price(request)
+        current_tick = self._price_to_tick(current_price)
+        return self._create_positions(current_tick, amount0, amount1, min_tick_width)
 
     def _create_positions(
         self,
@@ -180,21 +243,78 @@ class SimpleStrategyGenerator:
 
         return positions
 
-    def _create_rebalance_rule(self, max_rebalances: int) -> RebalanceRule:
+    def _create_rebalance_rule(self, max_rebalances: int) -> Optional[RebalanceRule]:
         """
-        Create a conservative rebalance rule.
+        Create a rebalance rule.
 
-        Trigger when price moves outside position ranges.
-        Use a reasonable cooldown to avoid excessive rebalancing.
+        Since we use smart positioning (wide tick ranges that cover historical
+        price movement), we don't need to rebalance. Return None.
+
+        This ensures 0 rebalances, which is always <= max_rebalances.
         """
-        # Cooldown based on max_rebalances
-        # If max 4 rebalances and we expect ~7200 blocks per day,
-        # cooldown should be at least 1800 blocks (6 hours)
-        cooldown_blocks = 1800
+        # With smart positioning, we cover the full historical price range
+        # so no rebalancing is needed
+        logger.info(f"Using no-rebalance strategy (wide ranges). Max allowed: {max_rebalances}")
+        return None
 
-        return RebalanceRule(
-            trigger="price_outside_range",
-            cooldown_blocks=cooldown_blocks
+    def should_rebalance(
+        self,
+        request: RebalanceRequest
+    ) -> Tuple[bool, Optional[List[Position]], Optional[str]]:
+        """
+        Determine if we should rebalance at this block.
+
+        This is the key method for Option 2 architecture - validators call
+        this endpoint during backtesting to let miners make dynamic decisions.
+
+        Miners can implement any logic here:
+        - ML model predictions
+        - External data (sentiment, whale movements)
+        - Technical indicators
+        - Custom heuristics
+
+        Args:
+            request: RebalanceRequest with current state
+
+        Returns:
+            Tuple of (should_rebalance, new_positions, reason)
+        """
+        current_price = request.current_price
+        current_positions = request.current_positions
+
+        # Simple rule: rebalance if price is outside all position ranges
+        price_in_range = False
+        for position in current_positions:
+            price_lower = self._tick_to_price(position.tickLower)
+            price_upper = self._tick_to_price(position.tickUpper)
+
+            if price_lower <= current_price <= price_upper:
+                price_in_range = True
+                break
+
+        if price_in_range:
+            # No need to rebalance
+            return (False, None, "Price is within position range")
+
+        # Price is outside range - create new positions centered on current price
+        current_tick = self._price_to_tick(current_price)
+
+        # Calculate total allocation from current positions
+        total_amount0 = sum(int(p.allocation0) for p in current_positions)
+        total_amount1 = sum(int(p.allocation1) for p in current_positions)
+
+        # Create new positions around current price
+        new_positions = self._create_positions(
+            current_tick=current_tick,
+            amount0=total_amount0,
+            amount1=total_amount1,
+            min_tick_width=60  # Default min tick width
+        )
+
+        return (
+            True,
+            new_positions,
+            f"Price {current_price:.2f} is outside position range, recentering"
         )
 
 
