@@ -300,6 +300,9 @@ class SN98Validator:
         # Get fee rate for backtesting
         fee_rate = self.config.get('fee_rate', DEFAULT_FEE_RATE)
 
+        # Get test miner URL if configured (for dynamic rebalancing)
+        test_miner_url = self.config.get('test_miner')
+
         # Backtest each strategy
         for uid, response in miner_responses.items():
             logger.info(f"Evaluating strategy from miner {uid}")
@@ -314,6 +317,20 @@ class SN98Validator:
             else:
                 constraint_violations[uid] = []
 
+            # Determine miner endpoint for dynamic rebalancing
+            # Test miner (UID -1) uses test_miner_url, production miners use axon info
+            miner_endpoint = None
+            if uid == -1 and test_miner_url:
+                miner_endpoint = test_miner_url
+            elif uid >= 0:
+                try:
+                    axon = self.metagraph.axons[uid]
+                    if hasattr(axon, 'is_serving') and axon.is_serving:
+                        miner_endpoint = f"http://{axon.ip}:{axon.port}"
+                except (IndexError, TypeError, AttributeError):
+                    # Metagraph may be mocked or axon not available
+                    pass
+
             # Backtest strategy
             try:
                 metrics = self.backtester.backtest_strategy(
@@ -323,7 +340,9 @@ class SN98Validator:
                     initial_amount1=initial_amount1,
                     start_block=start_block,
                     end_block=end_block,
-                    fee_rate=fee_rate
+                    fee_rate=fee_rate,
+                    miner_endpoint=miner_endpoint,
+                    round_id=request.metadata.round_id
                 )
 
                 # Validate performance metrics

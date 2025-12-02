@@ -7,11 +7,90 @@ Includes retry logic for transient failures.
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Any, Optional
+from abc import ABC, abstractmethod
 import logging
 from contextlib import contextmanager
 import time
 
 logger = logging.getLogger(__name__)
+
+
+class DataSource(ABC):
+    """
+    Abstract base class for pool data sources.
+
+    This allows the backtester and other components to work with
+    different data sources (database, API, CSV files, etc.) without
+    being tightly coupled to a specific implementation.
+    """
+
+    @abstractmethod
+    def get_swap_events(
+        self,
+        pair_address: str,
+        start_block: Optional[int] = None,
+        end_block: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch swap events for a specific pair within a block range."""
+        pass
+
+    @abstractmethod
+    def get_price_at_block(
+        self,
+        pair_address: str,
+        block_number: int
+    ) -> Optional[float]:
+        """Get the price (token1/token0) at a specific block."""
+        pass
+
+    @abstractmethod
+    def get_mint_events(
+        self,
+        pair_address: str,
+        start_block: Optional[int] = None,
+        end_block: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch mint (liquidity addition) events."""
+        pass
+
+    @abstractmethod
+    def get_burn_events(
+        self,
+        pair_address: str,
+        start_block: Optional[int] = None,
+        end_block: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch burn (liquidity removal) events."""
+        pass
+
+    @abstractmethod
+    def get_collect_events(
+        self,
+        pair_address: str,
+        start_block: Optional[int] = None,
+        end_block: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch collect (fee collection) events."""
+        pass
+
+    @abstractmethod
+    def get_fee_growth(
+        self,
+        pair_address: str,
+        start_block: int,
+        end_block: int
+    ) -> Dict[str, float]:
+        """Calculate fee growth between two blocks."""
+        pass
+
+    @abstractmethod
+    def get_tick_at_block(
+        self,
+        pair_address: str,
+        block_number: int
+    ) -> Optional[int]:
+        """Get the current tick at a specific block."""
+        pass
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -51,8 +130,10 @@ def retry_on_db_error(func):
     return wrapper
 
 
-class PoolDataDB:
+class PoolDataDB(DataSource):
     """
+    PostgreSQL implementation of the DataSource interface.
+
     Interface to the read-only Postgres database containing pool events.
     The database is fed by a subgraph and contains all on-chain events
     for Aerodrome pools (swaps, mints, burns, fee growth, etc.).
