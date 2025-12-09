@@ -309,7 +309,7 @@ class SimpleStrategyGenerator:
 
         # SMART LOGIC: Only rebalance if price is >10% outside the range
         # This prevents excessive rebalancing on small price movements
-        REBALANCE_THRESHOLD = 0.10  # 10% outside range
+        REBALANCE_THRESHOLD = 0.2  # 10% outside range
 
         if closest_range_distance < REBALANCE_THRESHOLD:
             logger.info(f"should_rebalance: price {current_price:.2f} only {closest_range_distance:.1%} outside - BELOW THRESHOLD")
@@ -328,7 +328,7 @@ class SimpleStrategyGenerator:
 
         # Create WIDE positions (20% range on each side)
         # This reduces future rebalances
-        price_buffer = 0.20  # 20% buffer on each side
+        price_buffer = 0.15  # 20% buffer on each side
         min_price = current_price * (1 - price_buffer)
         max_price = current_price * (1 + price_buffer)
 
