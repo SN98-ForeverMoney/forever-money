@@ -43,6 +43,12 @@ class Scorer:
         if not miner_metrics:
             return {}
 
+        # Single miner case - give full score if positive PnL, 0.5 otherwise
+        if len(miner_metrics) == 1:
+            uid = list(miner_metrics.keys())[0]
+            pnl = miner_metrics[uid].net_pnl_vs_hodl
+            return {uid: 1.0 if pnl >= 0 else 0.5}
+
         # Extract Net PnL vs HODL for all miners
         pnl_scores = {
             uid: metrics.net_pnl_vs_hodl
@@ -66,24 +72,30 @@ class Scorer:
         # Normalize top performers
         if top_miners:
             top_pnls = [pnl for _, pnl in top_miners]
-            max_pnl = max(top_pnls) if max(top_pnls) > 0 else 1.0
+            max_pnl = max(top_pnls)
             min_pnl = min(top_pnls)
 
-            for uid, pnl in top_miners:
-                if max_pnl - min_pnl > 0:
-                    # Linear scaling for top performers
-                    score = (pnl - min_pnl) / (max_pnl - min_pnl)
+            for rank, (uid, pnl) in enumerate(top_miners):
+                # Handle edge cases for normalization
+                if max_pnl == min_pnl:
+                    # All top miners have same PnL - give equal scores
+                    score = 1.0 if max_pnl >= 0 else 0.5
+                elif max_pnl <= 0:
+                    # All negative PnL - scale between 0.5 and 0.7
+                    score = 0.5 + 0.2 * (pnl - min_pnl) / (max_pnl - min_pnl) if max_pnl != min_pnl else 0.5
                 else:
-                    score = 1.0
+                    # Normal case - scale between 0.5 and 1.0 for top N
+                    # This ensures top miners are always differentiated
+                    normalized = (pnl - min_pnl) / (max_pnl - min_pnl)
+                    # Scale to 0.5-1.0 range to ensure top N always beat remaining
+                    score = 0.5 + 0.5 * normalized
 
-                # Ensure minimum score of 0.5 for top N
-                performance_scores[uid] = max(0.5, score)
+                performance_scores[uid] = score
 
         # Remaining miners get reduced scores
         if remaining_miners:
             for rank, (uid, pnl) in enumerate(remaining_miners, start=self.top_n_strategies):
                 # Exponential decay for ranks beyond top N
-                # Score decreases as rank increases
                 decay_factor = 0.5 ** ((rank - self.top_n_strategies) / 5)
                 score = max(0.0, 0.4 * decay_factor)
 

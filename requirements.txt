@@ -5,7 +5,9 @@ bittensor>=6.0.0
 
 # Web framework for miner
 flask>=3.0.0
+gunicorn>=21.0.0
 requests>=2.31.0
+tenacity>=8.2.0
 
 # Database
 psycopg2-binary>=2.9.9

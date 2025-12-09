@@ -13,7 +13,10 @@ from validator.models import (
     MinerMetadata,
     Inventory,
     Mode,
-    PerformanceMetrics
+    PerformanceMetrics,
+    MinerScore,
+    Metadata,
+    Constraints
 )
 
 
@@ -152,7 +155,7 @@ def test_query_miner_success(validator, mock_components):
         target_block=12345678,
         mode=Mode.INVENTORY,
         inventory=Inventory(amount0="1000000000000000000", amount1="2500000000"),
-        metadata=Mock(round_id="test-001", constraints=Mock())
+        metadata=Metadata(round_id="test-001", constraints=Constraints())
     )
 
     with patch('requests.post') as mock_post:
@@ -177,7 +180,7 @@ def test_query_miner_not_serving(validator, mock_components):
         target_block=12345678,
         mode=Mode.INVENTORY,
         inventory=Inventory(amount0="1000000000000000000", amount1="2500000000"),
-        metadata=Mock(round_id="test-001", constraints=Mock())
+        metadata=Metadata(round_id="test-001", constraints=Constraints())
     )
 
     # Query miner 2 (index 2) which is not serving
@@ -194,7 +197,7 @@ def test_query_miner_timeout(validator, mock_components):
         target_block=12345678,
         mode=Mode.INVENTORY,
         inventory=Inventory(amount0="1000000000000000000", amount1="2500000000"),
-        metadata=Mock(round_id="test-001", constraints=Mock())
+        metadata=Metadata(round_id="test-001", constraints=Constraints())
     )
 
     with patch('requests.post') as mock_post:
@@ -214,7 +217,7 @@ def test_poll_miners(validator, mock_components):
         target_block=12345678,
         mode=Mode.INVENTORY,
         inventory=Inventory(amount0="1000000000000000000", amount1="2500000000"),
-        metadata=Mock(round_id="test-001", constraints=Mock())
+        metadata=Metadata(round_id="test-001", constraints=Constraints())
     )
 
     mock_response_data = {

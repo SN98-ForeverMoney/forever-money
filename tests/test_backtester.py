@@ -60,16 +60,18 @@ def test_backtester_hodl_baseline(backtester, mock_db):
 
 def test_backtester_strategy_simulation(backtester, mock_db):
     """Test full strategy backtesting."""
-    # Setup mock data
-    mock_db.get_price_at_block.side_effect = [2500.0, 2600.0, 2600.0]
+    # Setup mock data - need enough values for all calls
+    # backtest_strategy calls: start price, end price, HODL start, HODL end
+    # simulate_position calls: final price for each position
+    mock_db.get_price_at_block.return_value = 2500.0  # Use return_value for consistent price
     mock_db.get_swap_events.return_value = [
         {
             'block_number': 150,
-            'event_data': {
-                'amount0': '-1000000000000000',
-                'amount1': '2500000',
-                'price': 2550.0
-            }
+            'amount0': '-1000000000000000',
+            'amount1': '2500000',
+            'sqrt_price_x96': str(int(2500**0.5 * 2**96)),  # ~$2500 price
+            'tick': -8000,
+            'liquidity': '10000000000000000000'  # Pool liquidity
         }
     ]
 
