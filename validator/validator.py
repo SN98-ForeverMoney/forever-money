@@ -6,19 +6,23 @@ import time
 import uuid
 import json
 from typing import List, Dict, Any, Optional, Iterable
-import requests
 
 import bittensor as bt
 
+from protocol import (
+    Inventory,
+    Mode,
+    StrategyRequest,
+    RebalanceQuery,
+    Position,
+)
 from validator.models import (
     ValidatorRequest,
-    MinerResponse,
-    Inventory,
-    Metadata,
+    MinerScore,
+    ValidatorMetadata,
     Constraints,
-    Mode,
-    MinerScore
 )
+from miner.models import MinerResponse
 from validator.database import PoolDataDB
 from validator.backtester import Backtester, DEFAULT_FEE_RATE
 from validator.constraints import ConstraintValidator
@@ -54,11 +58,15 @@ class SN98Validator:
         self.db = db
         self.config = config
 
+        # Initialize dendrite for communicating with miners
+        self.dendrite = bt.dendrite(wallet=wallet)
+
         # Get fee rate from config or use default
         fee_rate = config.get('fee_rate', DEFAULT_FEE_RATE)
 
         # Initialize components with fee rate
-        self.backtester = Backtester(db, fee_rate=fee_rate)
+        # Pass self (validator) to backtester so it can use dendrite for rebalance queries
+        self.backtester = Backtester(db, fee_rate=fee_rate, validator=self)
         self.scorer = Scorer(
             performance_weight=config.get('performance_weight', 0.7),
             lp_alignment_weight=config.get('lp_alignment_weight', 0.3),
@@ -71,57 +79,6 @@ class SN98Validator:
 
         logger.info(f"Validator initialized with hotkey: {wallet.hotkey.ss58_address}")
         logger.info(f"Fee rate: {fee_rate:.4f} ({fee_rate*100:.2f}%)")
-
-    def query_test_miner(
-        self,
-        request: ValidatorRequest,
-        test_miner_url: str,
-        timeout: int = 30
-    ) -> Optional[MinerResponse]:
-        """
-        Query a test miner directly (bypassing metagraph).
-
-        Args:
-            request: ValidatorRequest to send
-            test_miner_url: URL of the test miner (e.g., http://localhost:8000)
-            timeout: Request timeout in seconds
-
-        Returns:
-            MinerResponse or None if failed
-        """
-        url = f"{test_miner_url.rstrip('/')}/predict_strategy"
-
-        try:
-            logger.info(f"Querying test miner at {url}")
-
-            response = requests.post(
-                url,
-                json=request.model_dump(),
-                timeout=timeout,
-                headers={'Content-Type': 'application/json'}
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                miner_response = MinerResponse(**data)
-                logger.info(f"Received response from test miner")
-                return miner_response
-            else:
-                logger.warning(
-                    f"Test miner returned status {response.status_code}: "
-                    f"{response.text}"
-                )
-                return None
-
-        except requests.exceptions.Timeout:
-            logger.warning(f"Test miner request timed out")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Error querying test miner: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error querying test miner: {e}")
-            return None
 
     def generate_round_request(
         self,
@@ -150,14 +107,14 @@ class SN98Validator:
             max_rebalances=self.config.get('max_rebalances', 4)
         )
 
-        metadata = Metadata(
+        metadata = ValidatorMetadata(
             round_id=round_id,
             constraints=constraints
         )
 
         request = ValidatorRequest(
-            pairAddress=pair_address,
-            chainId=self.config.get('chain_id', 8453),
+            pair_address=pair_address,
+            chain_id=self.config.get('chain_id', 8453),
             target_block=target_block,
             mode=mode,
             inventory=inventory,
@@ -175,7 +132,7 @@ class SN98Validator:
         timeout: int = 5
     ) -> Optional[MinerResponse]:
         """
-        Query a single miner for their strategy.
+        Query a single miner for their strategy using dendrite.
 
         Args:
             miner_uid: Miner UID
@@ -192,40 +149,110 @@ class SN98Validator:
             logger.warning(f"Miner {miner_uid} is not serving")
             return None
 
-        # Construct endpoint URL
-        # Miners should expose /predict_strategy endpoint
-        url = f"http://{axon.ip}:{axon.port}/predict_strategy"
-
         try:
-            logger.info(f"Querying miner {miner_uid} at {url}")
+            logger.info(f"Querying miner {miner_uid} at {axon.ip}:{axon.port}")
 
-            response = requests.post(
-                url,
-                json=request.model_dump(),
-                timeout=timeout,
-                headers={'Content-Type': 'application/json'}
+            # Create synapse from request
+            synapse = StrategyRequest(
+                pair_address=request.pair_address,
+                chain_id=request.chain_id,
+                target_block=request.target_block,
+                mode=request.mode,
+                inventory=request.inventory,
+                current_positions=request.current_positions,
+                metadata=request.metadata,
+                postgres_access=request.postgres_access,
             )
 
-            if response.status_code == 200:
-                data = response.json()
-                miner_response = MinerResponse(**data)
+            # Query using dendrite
+            response = self.dendrite.query(
+                axons=[axon],
+                synapse=synapse,
+                timeout=timeout,
+                deserialize=True,
+            )[0]
+
+            # Check if response is valid
+            if response and response.strategy and response.miner_metadata:
+                miner_response = MinerResponse(
+                    strategy=response.strategy,
+                    miner_metadata=response.miner_metadata
+                )
                 logger.info(f"Received response from miner {miner_uid}")
                 return miner_response
             else:
-                logger.warning(
-                    f"Miner {miner_uid} returned status {response.status_code}: "
-                    f"{response.text}"
-                )
+                logger.warning(f"Miner {miner_uid} returned invalid response")
                 return None
 
-        except requests.exceptions.Timeout:
-            logger.warning(f"Miner {miner_uid} request timed out")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Error querying miner {miner_uid}: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Unexpected error querying miner {miner_uid}: {e}")
+            logger.error(f"Error querying miner {miner_uid}: {e}")
+            return None
+
+    def query_miner_rebalance(
+        self,
+        miner_uid: int,
+        block_number: int,
+        current_price: float,
+        current_positions: List[Position],
+        pair_address: str,
+        chain_id: int,
+        round_id: str,
+        timeout: int = 5
+    ) -> Optional[tuple[bool, Optional[List[Position]], Optional[str]]]:
+        """
+        Query a miner for rebalance decision using dendrite.
+
+        This is called during backtesting to let miners make dynamic
+        rebalancing decisions.
+
+        Args:
+            miner_uid: Miner UID
+            block_number: Current block in simulation
+            current_price: Current price
+            current_positions: Current LP positions
+            pair_address: Pool address
+            chain_id: Chain ID
+            round_id: Round identifier
+            timeout: Request timeout in seconds
+
+        Returns:
+            Tuple of (should_rebalance, new_positions, reason) or None if failed
+        """
+        # Get miner axon info
+        axon = self.metagraph.axons[miner_uid]
+
+        if not axon.is_serving:
+            logger.warning(f"Miner {miner_uid} is not serving")
+            return None
+
+        try:
+            # Create synapse for rebalance query
+            synapse = RebalanceQuery(
+                block_number=block_number,
+                current_price=current_price,
+                current_positions=current_positions,
+                pair_address=pair_address,
+                chain_id=chain_id,
+                round_id=round_id,
+            )
+
+            # Query using dendrite
+            response = self.dendrite.query(
+                axons=[axon],
+                synapse=synapse,
+                timeout=timeout,
+                deserialize=True,
+            )[0]
+
+            # Check if response is valid
+            if response and response.rebalance is not None:
+                return (response.rebalance, response.new_positions, response.reason)
+            else:
+                logger.warning(f"Miner {miner_uid} returned invalid rebalance response")
+                return None
+
+        except Exception as e:
+            logger.warning(f"Error querying miner {miner_uid} for rebalance: {e}")
             return None
 
     def poll_miners(
@@ -317,31 +344,17 @@ class SN98Validator:
             else:
                 constraint_violations[uid] = []
 
-            # Determine miner endpoint for dynamic rebalancing
-            # Test miner (UID -1) uses test_miner_url, production miners use axon info
-            miner_endpoint = None
-            if uid == -1 and test_miner_url:
-                miner_endpoint = test_miner_url
-            elif uid >= 0:
-                try:
-                    axon = self.metagraph.axons[uid]
-                    if hasattr(axon, 'is_serving') and axon.is_serving:
-                        miner_endpoint = f"http://{axon.ip}:{axon.port}"
-                except (IndexError, TypeError, AttributeError):
-                    # Metagraph may be mocked or axon not available
-                    pass
-
-            # Backtest strategy
+            # Backtest strategy with miner_uid for dynamic rebalancing
             try:
                 metrics = self.backtester.backtest_strategy(
-                    pair_address=request.pairAddress,
+                    pair_address=request.pair_address,
                     strategy=response.strategy,
                     initial_amount0=initial_amount0,
                     initial_amount1=initial_amount1,
                     start_block=start_block,
                     end_block=end_block,
                     fee_rate=fee_rate,
-                    miner_endpoint=miner_endpoint,
+                    miner_uid=uid if uid >= 0 else None,
                     round_id=request.metadata.round_id
                 )
 
@@ -372,7 +385,7 @@ class SN98Validator:
         # Get LP alignment data (vault fees)
         vault_fees = self._get_vault_fees(
             miner_uids=list(miner_responses.keys()),
-            pair_address=request.pairAddress,
+            pair_address=request.pair_address,
             start_block=start_block,
             end_block=end_block
         )
@@ -589,17 +602,12 @@ class SN98Validator:
             mode=Mode.INVENTORY
         )
 
-        # 2. Poll miners (or test miner if specified)
-        test_miner_url = self.config.get('test_miner')
-        if test_miner_url:
-            logger.info(f"Using test miner at {test_miner_url}")
-            response = self.query_test_miner(request, test_miner_url)
-            if response:
-                miner_responses = {-1: response}  # Use -1 as UID for test miner
-            else:
-                miner_responses = {}
-        else:
-            miner_responses = self.poll_miners(request)
+        # 2. Poll miners (specific UIDs if provided, otherwise all active miners)
+        miner_uids = self.config.get('miner_uids')
+        if miner_uids:
+            logger.info(f"Querying specific miners: {miner_uids}")
+
+        miner_responses = self.poll_miners(request, miner_uids=miner_uids)
 
         if not miner_responses:
             logger.warning("No valid miner responses received")

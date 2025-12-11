@@ -3,9 +3,9 @@ Scoring system for SN98 - combines performance and LP alignment.
 """
 import logging
 from typing import List, Dict
-import numpy as np
 
-from validator.models import MinerScore, PerformanceMetrics
+from protocol import PerformanceMetrics
+from validator.models import MinerScore
 
 logger = logging.getLogger(__name__)
 

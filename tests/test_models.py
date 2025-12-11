@@ -13,7 +13,7 @@ from validator.models import (
     Inventory,
     Mode,
     Constraints,
-    Metadata
+    ValidatorMetadata
 )
 
 
@@ -158,7 +158,7 @@ def test_validator_request_inventory_mode():
         max_rebalances=4
     )
 
-    metadata = Metadata(
+    metadata = ValidatorMetadata(
         round_id="test-round-001",
         constraints=constraints
     )
@@ -188,7 +188,7 @@ def test_validator_request_inventory_required():
         max_rebalances=4
     )
 
-    metadata = Metadata(
+    metadata = ValidatorMetadata(
         round_id="test-round-001",
         constraints=constraints
     )
@@ -215,7 +215,7 @@ def test_validator_request_position_mode():
         max_rebalances=4
     )
 
-    metadata = Metadata(
+    metadata = ValidatorMetadata(
         round_id="test-round-001",
         constraints=constraints
     )
@@ -256,7 +256,7 @@ def test_metadata_with_custom_constraints():
         max_rebalances=6
     )
 
-    metadata = Metadata(
+    metadata = ValidatorMetadata(
         round_id="custom-round-001",
         constraints=constraints
     )

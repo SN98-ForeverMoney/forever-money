@@ -3,7 +3,8 @@ Constraint validation for miner strategies.
 """
 import logging
 from typing import List, Tuple
-from validator.models import Strategy, Constraints, Position
+from protocol import Strategy, Position
+from validator.models import Constraints
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class ConstraintValidator:
         min_tick_width = self.constraints.min_tick_width
 
         for i, position in enumerate(positions):
-            tick_width = position.tickUpper - position.tickLower
+            tick_width = position.tick_upper - position.tick_lower
 
             if tick_width < min_tick_width:
                 violation = (
@@ -100,7 +101,7 @@ class ConstraintValidator:
 
         # Check if positions are reasonable (not too wide or too narrow)
         for i, position in enumerate(strategy.positions):
-            tick_width = position.tickUpper - position.tickLower
+            tick_width = position.tick_upper - position.tick_lower
 
             # Extremely wide positions (> 10000 ticks) may have high IL
             if tick_width > 10000:

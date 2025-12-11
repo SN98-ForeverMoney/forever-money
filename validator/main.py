@@ -11,7 +11,7 @@ import bittensor as bt
 
 from validator.validator import SN98Validator
 from validator.database import PoolDataDB
-from validator.models import Inventory
+from protocol import Inventory
 
 # Configure logging
 logging.basicConfig(
@@ -41,10 +41,19 @@ def get_config():
     parser.add_argument('--pair_address', type=str, help='Trading pair address')
     parser.add_argument('--target_block', type=int, help='Target block for round')
     parser.add_argument('--start_block', type=int, help='Starting block for backtest')
-    parser.add_argument('--test-miner', type=str, help='Test with local miner at specified URL (e.g., http://localhost:8000)')
+    parser.add_argument('--miner-uids', type=str, help='Comma-separated list of miner UIDs to query (e.g., "0,1,2"). If not specified, queries all active miners.')
     parser.add_argument('--dry-run', action='store_true', help='Run without publishing weights to the network')
 
     args = parser.parse_args()
+
+    # Parse miner UIDs if provided
+    miner_uids = None
+    if getattr(args, 'miner_uids', None):
+        try:
+            miner_uids = [int(uid.strip()) for uid in args.miner_uids.split(',')]
+        except ValueError:
+            logger.error(f"Invalid miner UIDs format: {args.miner_uids}. Expected comma-separated integers.")
+            sys.exit(1)
 
     config = {
         'netuid': args.netuid,
@@ -62,7 +71,7 @@ def get_config():
         'lp_alignment_weight': float(os.getenv('LP_ALIGNMENT_WEIGHT', 0.3)),
         'top_n_strategies': int(os.getenv('TOP_N_STRATEGIES', 3)),
         'winning_strategy_file': os.getenv('WINNING_STRATEGY_FILE', 'winning_strategy.json'),
-        'test_miner': getattr(args, 'test_miner', None),
+        'miner_uids': miner_uids,
         'dry_run': getattr(args, 'dry_run', False),
         'postgres_access': {
             'host': os.getenv('POSTGRES_HOST', 'localhost'),

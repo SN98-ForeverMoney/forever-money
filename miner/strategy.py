@@ -8,12 +8,16 @@ import logging
 import math
 from typing import List, Optional, Tuple
 
-from validator.models import (
-    ValidatorRequest,
+from protocol import (
     Strategy,
     Position,
     RebalanceRule,
-    RebalanceRequest
+    StrategyRequest,
+    RebalanceQuery,
+)
+from validator.models import (
+    ValidatorRequest,
+    RebalanceRequest,
 )
 from validator.database import PoolDataDB
 
@@ -39,6 +43,59 @@ class SimpleStrategyGenerator:
         """
         self.db = db
 
+    def generate_strategy_from_synapse(self, synapse: StrategyRequest) -> Strategy:
+        """
+        Generate strategy from a StrategyRequest synapse.
+
+        This is a wrapper around generate_strategy that converts the synapse
+        to a ValidatorRequest format.
+
+        Args:
+            synapse: StrategyRequest synapse
+
+        Returns:
+            Strategy object
+        """
+        # Convert synapse to ValidatorRequest
+        request = ValidatorRequest(
+            pair_address=synapse.pair_address,
+            chain_id=synapse.chain_id,
+            target_block=synapse.target_block,
+            mode=synapse.mode,
+            inventory=synapse.inventory,
+            current_positions=synapse.current_positions,
+            metadata=synapse.metadata,
+            postgres_access=synapse.postgres_access,
+        )
+        return self.generate_strategy(request)
+
+    def should_rebalance_from_synapse(
+        self,
+        synapse: RebalanceQuery
+    ) -> Tuple[bool, Optional[List[Position]], Optional[str]]:
+        """
+        Determine if we should rebalance from a RebalanceQuery synapse.
+
+        This is a wrapper around should_rebalance that converts the synapse
+        to a RebalanceRequest format.
+
+        Args:
+            synapse: RebalanceQuery synapse
+
+        Returns:
+            Tuple of (should_rebalance, new_positions, reason)
+        """
+        # Convert synapse to RebalanceRequest
+        request = RebalanceRequest(
+            block_number=synapse.block_number,
+            current_price=synapse.current_price,
+            current_positions=synapse.current_positions,
+            pair_address=synapse.pair_address,
+            chain_id=synapse.chain_id,
+            round_id=synapse.round_id,
+        )
+        return self.should_rebalance(request)
+
     def generate_strategy(self, request: ValidatorRequest) -> Strategy:
         """
         Generate an LP strategy for the given request.
@@ -49,10 +106,15 @@ class SimpleStrategyGenerator:
         Returns:
             Strategy object
         """
-        logger.info(f"Generating strategy for round {request.metadata.round_id}")
+        # Handle metadata (might be None due to Bittensor serialization)
+        if request.metadata:
+            logger.info(f"Generating strategy for round {request.metadata.round_id}")
+            constraints = request.metadata.constraints
+        else:
+            logger.warning("No metadata provided, using default constraints")
+            from validator.models import Constraints
+            constraints = Constraints()
 
-        # Extract constraints
-        constraints = request.metadata.constraints
         min_tick_width = constraints.min_tick_width
 
         # Get inventory
@@ -94,7 +156,7 @@ class SimpleStrategyGenerator:
         """
         if self.db:
             price = self.db.get_price_at_block(
-                request.pairAddress,
+                request.pair_address,
                 request.target_block
             )
             if price:
@@ -132,8 +194,8 @@ class SimpleStrategyGenerator:
                 start_block = int(os.getenv('START_BLOCK', 35330091))
                 end_block = request.target_block
 
-                start_price = self.db.get_price_at_block(request.pairAddress, start_block)
-                end_price = self.db.get_price_at_block(request.pairAddress, end_block)
+                start_price = self.db.get_price_at_block(request.pair_address, start_block)
+                end_price = self.db.get_price_at_block(request.pair_address, end_block)
 
                 if start_price and end_price:
                     # Cover the historical price range with small buffer
@@ -162,8 +224,8 @@ class SimpleStrategyGenerator:
                     )
 
                     return [Position(
-                        tickLower=lower_tick,
-                        tickUpper=upper_tick,
+                        tick_lower=lower_tick,
+                        tick_upper=upper_tick,
                         allocation0=str(amount0),
                         allocation1=str(amount1),
                         confidence=0.90
@@ -211,8 +273,8 @@ class SimpleStrategyGenerator:
             upper_tick_1 = lower_tick_1 + min_tick_width
 
         positions.append(Position(
-            tickLower=lower_tick_1,
-            tickUpper=upper_tick_1,
+            tick_lower=lower_tick_1,
+            tick_upper=upper_tick_1,
             allocation0=str(int(amount0 * 0.6)),
             allocation1=str(int(amount1 * 0.6)),
             confidence=0.85
@@ -228,8 +290,8 @@ class SimpleStrategyGenerator:
             upper_tick_2 = lower_tick_2 + min_tick_width
 
         positions.append(Position(
-            tickLower=lower_tick_2,
-            tickUpper=upper_tick_2,
+            tick_lower=lower_tick_2,
+            tick_upper=upper_tick_2,
             allocation0=str(int(amount0 * 0.4)),
             allocation1=str(int(amount1 * 0.4)),
             confidence=0.72
@@ -289,8 +351,8 @@ class SimpleStrategyGenerator:
         closest_range_distance = float('inf')
 
         for position in current_positions:
-            price_lower = self._tick_to_price(position.tickLower)
-            price_upper = self._tick_to_price(position.tickUpper)
+            price_lower = self._tick_to_price(position.tick_lower)
+            price_upper = self._tick_to_price(position.tick_upper)
 
             if price_lower <= current_price <= price_upper:
                 price_in_range = True
@@ -341,8 +403,8 @@ class SimpleStrategyGenerator:
         upper_tick = ((upper_tick // tick_spacing) + 1) * tick_spacing
 
         new_positions = [Position(
-            tickLower=lower_tick,
-            tickUpper=upper_tick,
+            tick_lower=lower_tick,
+            tick_upper=upper_tick,
             allocation0=str(total_amount0),
             allocation1=str(total_amount1),
             confidence=0.85

@@ -8,12 +8,15 @@ concentrated liquidity positions, including:
 - Rebalance simulation following strategy rules
 """
 import logging
-from typing import List, Dict, Any, Tuple, Optional
 import math
+from typing import List, Dict, Any, Tuple, Optional, TYPE_CHECKING
 
-from validator.models import Strategy, Position, PerformanceMetrics, RebalanceRule, RebalanceRequest, RebalanceResponse
+from protocol import Strategy, Position, PerformanceMetrics, RebalanceRule
 from validator.database import DataSource
-import requests
+
+# Avoid circular import
+if TYPE_CHECKING:
+    from validator.validator import SN98Validator
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +168,7 @@ class Backtester:
         data_source: DataSource,
         fee_rate: float = DEFAULT_FEE_RATE,
         default_pool_liquidity: int = 10_000_000_000_000_000_000,  # 10 ETH worth
-        miner_endpoint: Optional[str] = None,
+        validator: Optional['SN98Validator'] = None,
         rebalance_check_interval: int = 1000  # Check every N blocks
     ):
         """
@@ -175,14 +178,14 @@ class Backtester:
             data_source: Data source for historical data (implements DataSource interface)
             fee_rate: Pool fee rate (e.g., 0.003 for 0.3%)
             default_pool_liquidity: Default total pool liquidity if not available from DB
-            miner_endpoint: Optional miner URL for dynamic rebalance decisions
+            validator: Optional validator instance for querying miners via dendrite
             rebalance_check_interval: How often to check miner for rebalance (in blocks)
         """
         self.db = data_source  # Keep as self.db for compatibility
         self.math = UniswapV3Math()
         self.fee_rate = fee_rate
         self.default_pool_liquidity = default_pool_liquidity
-        self.miner_endpoint = miner_endpoint
+        self.validator = validator
         self.rebalance_check_interval = rebalance_check_interval
 
     def calculate_hodl_baseline(
@@ -237,8 +240,8 @@ class Backtester:
         Returns:
             Tuple of (liquidity, actual_amount0_used, actual_amount1_used)
         """
-        price_lower = self.math.tick_to_price(position.tickLower)
-        price_upper = self.math.tick_to_price(position.tickUpper)
+        price_lower = self.math.tick_to_price(position.tick_lower)
+        price_upper = self.math.tick_to_price(position.tick_upper)
 
         sqrt_price = math.sqrt(current_price)
         sqrt_price_lower = math.sqrt(price_lower)
@@ -361,7 +364,8 @@ class Backtester:
         positions: List[Position],
         start_block: int,
         pair_address: str = "",
-        round_id: str = ""
+        round_id: str = "",
+        miner_uid: Optional[int] = None
     ) -> Tuple[int, List[int]]:
         """
         Simulate when rebalances would occur based on strategy rules.
@@ -384,10 +388,11 @@ class Backtester:
         if not swap_events:
             return 0, []
 
-        # If miner endpoint is configured, use dynamic rebalancing
-        if self.miner_endpoint:
+        # If validator and miner_uid are configured, use dynamic rebalancing
+        if self.validator and miner_uid is not None:
             return self._simulate_rebalances_dynamic(
                 swap_events=swap_events,
+                miner_uid=miner_uid,
                 positions=positions,
                 start_block=start_block,
                 pair_address=pair_address,
@@ -407,8 +412,8 @@ class Backtester:
             return 0, []
 
         # Use first position's bounds as trigger reference
-        tick_lower = positions[0].tickLower
-        tick_upper = positions[0].tickUpper
+        tick_lower = positions[0].tick_lower
+        tick_upper = positions[0].tick_upper
 
         for event in swap_events:
             event_block = event.get('block_number', 0)
@@ -445,13 +450,14 @@ class Backtester:
         positions: List[Position],
         start_block: int,
         pair_address: str,
-        round_id: str
+        round_id: str,
+        miner_uid: int
     ) -> Tuple[int, List[int]]:
         """
-        Simulate rebalances by calling miner endpoint at regular intervals.
+        Simulate rebalances by querying miner via dendrite at regular intervals.
 
         This is the Option 2 architecture: validators ask miners for
-        rebalance decisions during backtesting.
+        rebalance decisions during backtesting using Bittensor's dendrite/axon.
 
         Args:
             swap_events: Historical swap events
@@ -459,11 +465,12 @@ class Backtester:
             start_block: Starting block
             pair_address: Pool address
             round_id: Round identifier
+            miner_uid: Miner UID to query
 
         Returns:
             Tuple of (num_rebalances, list of rebalance blocks)
         """
-        if not self.miner_endpoint or not positions:
+        if not self.validator or not positions:
             return 0, []
 
         rebalance_blocks = []
@@ -484,7 +491,6 @@ class Backtester:
 
         # Check at regular intervals
         sorted_blocks = sorted(block_to_price.keys())
-        endpoint_url = f"{self.miner_endpoint}/should_rebalance"
 
         for block in sorted_blocks:
             # Only check at intervals
@@ -494,8 +500,9 @@ class Backtester:
             price = block_to_price[block]
             last_check_block = block
 
-            # Build request
-            rebalance_request = RebalanceRequest(
+            # Query miner using validator's dendrite
+            result = self.validator.query_miner_rebalance(
+                miner_uid=miner_uid,
                 block_number=block,
                 current_price=price,
                 current_positions=current_positions,
@@ -504,31 +511,19 @@ class Backtester:
                 round_id=round_id
             )
 
-            try:
-                response = requests.post(
-                    endpoint_url,
-                    json=rebalance_request.model_dump(),
-                    timeout=5
-                )
+            if result:
+                should_rebalance, new_positions, reason = result
 
-                if response.status_code == 200:
-                    rebalance_response = RebalanceResponse(**response.json())
-
-                    if rebalance_response.rebalance:
-                        rebalance_blocks.append(block)
-                        # Update positions for next iteration
-                        if rebalance_response.new_positions:
-                            current_positions = rebalance_response.new_positions
-                        logger.debug(
-                            f"Rebalance at block {block}: {rebalance_response.reason}"
-                        )
-                else:
-                    logger.warning(
-                        f"Miner returned {response.status_code} for rebalance check"
+                if should_rebalance:
+                    rebalance_blocks.append(block)
+                    # Update positions for next iteration
+                    if new_positions:
+                        current_positions = new_positions
+                    logger.debug(
+                        f"Rebalance at block {block}: {reason}"
                     )
-
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Failed to call miner for rebalance check: {e}")
+            else:
+                logger.warning(f"Failed to query miner {miner_uid} for rebalance at block {block}")
                 # Continue with static simulation if miner is unreachable
                 continue
 
@@ -567,8 +562,8 @@ class Backtester:
         fee_rate = fee_rate or self.fee_rate
 
         # Convert tick bounds to prices
-        price_lower = self.math.tick_to_price(position.tickLower)
-        price_upper = self.math.tick_to_price(position.tickUpper)
+        price_lower = self.math.tick_to_price(position.tick_lower)
+        price_upper = self.math.tick_to_price(position.tick_upper)
 
         # Get swap events in this range
         swap_events = self.db.get_swap_events(pair_address, start_block, end_block)
@@ -709,7 +704,7 @@ class Backtester:
         start_block: int,
         end_block: int,
         fee_rate: Optional[float] = None,
-        miner_endpoint: Optional[str] = None,
+        miner_uid: Optional[int] = None,
         round_id: str = ""
     ) -> PerformanceMetrics:
         """
@@ -779,14 +774,8 @@ class Backtester:
         net_pnl = final_value + total_fees - initial_value
         net_pnl_vs_hodl = net_pnl - hodl_pnl
 
-        # Simulate rebalances (use per-call miner_endpoint if provided, else fall back to instance default)
+        # Simulate rebalances
         swap_events = self.db.get_swap_events(pair_address, start_block, end_block)
-        effective_miner_endpoint = miner_endpoint or self.miner_endpoint
-
-        # Temporarily set miner_endpoint for this backtest if provided
-        original_endpoint = self.miner_endpoint
-        if effective_miner_endpoint:
-            self.miner_endpoint = effective_miner_endpoint
 
         num_rebalances, _ = self._simulate_rebalances(
             swap_events,
@@ -794,11 +783,9 @@ class Backtester:
             strategy.positions,
             start_block,
             pair_address=pair_address,
-            round_id=round_id
+            round_id=round_id,
+            miner_uid=miner_uid
         )
-
-        # Restore original endpoint
-        self.miner_endpoint = original_endpoint
 
         logger.info(
             f"Backtest results: PnL={net_pnl:.2f}, vs HODL={net_pnl_vs_hodl:.2f}, "

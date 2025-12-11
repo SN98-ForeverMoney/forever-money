@@ -11,7 +11,7 @@ from validator.models import (
     MinerResponse,
     Inventory,
     Mode,
-    Metadata,
+    ValidatorMetadata,
     Constraints
 )
 from miner.strategy import SimpleStrategyGenerator
@@ -29,7 +29,7 @@ def test_miner_strategy_generation():
             amount0="1000000000000000000",
             amount1="2500000000"
         ),
-        metadata=Metadata(
+        metadata=ValidatorMetadata(
             round_id="test-round-001",
             constraints=Constraints(
                 max_il=0.10,
@@ -382,7 +382,7 @@ def test_api_format_compatibility():
             amount1="2500000000"
         ),
         current_positions=[],
-        metadata=Metadata(
+        metadata=ValidatorMetadata(
             round_id="2025-02-01-001",
             constraints=Constraints(
                 max_il=0.10,
