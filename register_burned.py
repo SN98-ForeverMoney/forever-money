@@ -6,6 +6,7 @@ This avoids the TransactorAccountShouldBeHotKey error
 import bittensor as bt
 import sys
 
+
 def main():
     wallet_name = "test_validator"
     hotkey_name = "test_hotkey"
@@ -26,7 +27,7 @@ def main():
 
         # Connect to testnet
         print(f"\n2. Connecting to testnet...")
-        subtensor = bt.subtensor(network='test')
+        subtensor = bt.subtensor(network="test")
         print(f"   ✅ Connected to testnet")
         print(f"      Endpoint: {subtensor.chain_endpoint}")
 
@@ -77,7 +78,7 @@ def main():
             wallet=wallet,
             netuid=netuid,
             wait_for_inclusion=True,
-            wait_for_finalization=True
+            wait_for_finalization=True,
         )
 
         if success:
@@ -117,10 +118,12 @@ def main():
     except Exception as e:
         print(f"\n❌ Error during registration: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
     print("=" * 70)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -2,399 +2,341 @@
 
 ## System Architecture Overview
 
-SN98 is a decentralized Automated Liquidity Manager (ALM) built on Bittensor. The system optimizes Uniswap V3 / Aerodrome liquidity provision through competitive strategy proposals from miners.
+SN98 is a decentralized Automated Liquidity Manager (ALM) built on Bittensor. The system optimizes Uniswap V3 / Aerodrome liquidity provision through competitive strategy proposals from miners using a **jobs-based architecture** with **dual-mode operation** (evaluation + live) running concurrently.
 
-## Component Diagram
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Bittensor Network                       │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │  Validator  │  │  Validator  │  │  Validator  │         │
-│  │      1      │  │      2      │  │      N      │         │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
-│         │                 │                 │                 │
-│         └────────┬────────┴────────┬────────┘                │
-│                  │                 │                          │
-│         ┌────────▼────────┐        │                         │
-│         │   Metagraph     │        │                         │
-│         │   (Consensus)   │        │                         │
-│         └─────────────────┘        │                         │
-│                                    │                          │
-│  ┌──────────────────────────────────▼─────────────────────┐ │
-│  │              HTTP Polling Layer                        │ │
-│  └──────────────────────────────────┬─────────────────────┘ │
-│                                     │                        │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │   Miner 1   │  │   Miner 2   │  │   Miner N   │         │
-│  │ /predict_   │  │ /predict_   │  │ /predict_   │         │
-│  │  strategy   │  │  strategy   │  │  strategy   │         │
-│  └─────────────┘  └─────────────┘  └─────────────┘         │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          │ Strategies
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Executor Bot                              │
-│              (Subnet Owner Controlled)                       │
-│  - Reads winning strategy                                    │
-│  - Converts to v3 NFT LP operations                          │
-│  - Executes via multisig (MVP) or automated (future)        │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Aerodrome / Uniswap V3 Pools                    │
-│                     (Base Chain)                             │
-│  - Vaults deploy liquidity                                   │
-│  - Generate LP fees                                          │
-│  - Accrue value for token holders                           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Data Flow
-
-### 1. Round Generation (Validator)
+## High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Validator generates round parameters                         │
-│                                                              │
-│  • Pair address (e.g., WETH/USDC)                           │
-│  • Target block number                                       │
-│  • Inventory (amount0, amount1)                             │
-│  • Constraints (max_il, min_tick_width, max_rebalances)     │
-│  • Round ID                                                  │
-│  • Postgres access credentials (read-only)                  │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-                            ▼
-                   ValidatorRequest JSON
+┌─────────────────────────────────────────────────────────────────┐
+│                         Bittensor Network                        │
+│  ┌──────────────┐              ┌──────────────────────────────┐ │
+│  │   Miners     │◄────────────►│       Validator              │ │
+│  │  (N nodes)   │              │    (Jobs Orchestrator)       │ │
+│  └──────────────┘              └──────────────────────────────┘ │
+│       │                                    │                     │
+│       │ RebalanceQuery                     │ Job Management      │
+│       │ (Dynamic decisions)                │                     │
+│       └────────────────────────────────────┘                     │
+└─────────────────────────────────────────────────────────────────┘
+                                              │
+                    ┌─────────────────────────┼──────────────────────┐
+                    │                         │                      │
+          ┌─────────▼──────────┐    ┌────────▼────────┐   ┌────────▼────────┐
+          │   Jobs Database    │    │  Pool Events DB │   │  Blockchain RPC │
+          │  (Tortoise ORM)    │    │  (Read-only)    │   │    (Base L2)    │
+          │                    │    │                 │   │                 │
+          │ • jobs             │    │ • swaps         │   │ • Current state │
+          │ • rounds           │    │ • mints         │   │ • Price feeds   │
+          │ • predictions      │    │ • burns         │   │ • Execution     │
+          │ • miner_scores     │    │ • collects      │   │                 │
+          │ • participations   │    │                 │   │                 │
+          │ • live_executions  │    │                 │   │                 │
+          └────────────────────┘    └─────────────────┘   └─────────────────┘
 ```
 
-### 2. Strategy Proposal (Miners)
+## Jobs-Based Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Miner receives request and generates strategy                │
-│                                                              │
-│  1. Query Postgres DB for historical pool events            │
-│     - Swaps, mints, burns, fee collection                   │
-│     - Price movements, liquidity distribution               │
-│                                                              │
-│  2. Run internal model/algorithm                            │
-│     - ML predictions                                         │
-│     - Optimization routines                                  │
-│     - Risk management                                        │
-│                                                              │
-│  3. Generate positions                                       │
-│     - Tick ranges (tickLower, tickUpper)                    │
-│     - Allocations (amount0, amount1)                        │
-│     - Confidence scores                                      │
-│                                                              │
-│  4. Define rebalance rules (optional)                       │
-│     - Trigger conditions                                     │
-│     - Cooldown periods                                       │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-                            ▼
-                   MinerResponse JSON
-```
+### Core Concept: Jobs
 
-### 3. Strategy Evaluation (Validator)
+A **Job** represents a liquidity management task for a specific vault and trading pair. Multiple jobs run **concurrently** in the validator.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Validator evaluates all miner strategies                     │
-│                                                              │
-│  Step 1: Constraint Validation                              │
-│  ├─ Check tick widths >= min_tick_width                     │
-│  ├─ Validate allocations > 0                                │
-│  └─ Pre-check rebalance rules                               │
-│                                                              │
-│  Step 2: Backtesting (70% score component)                  │
-│  ├─ Simulate strategy using historical data                 │
-│  ├─ Calculate fees collected                                │
-│  ├─ Measure impermanent loss                                │
-│  ├─ Compare to HODL baseline                                │
-│  ├─ Verify IL <= max_il                                     │
-│  ├─ Count rebalances <= max_rebalances                      │
-│  └─ Calculate Net PnL vs HODL                               │
-│                                                              │
-│  Step 3: LP Alignment (30% score component)                 │
-│  ├─ Query vault fees from database                          │
-│  ├─ Calculate pro-rata share per miner                      │
-│  └─ Score based on fee contribution                         │
-│                                                              │
-│  Step 4: Final Scoring                                      │
-│  ├─ Apply top-heavy weighting (top 3 get full weight)      │
-│  ├─ Calculate: score = perf*0.7 + lp*0.3                   │
-│  └─ Set score=0 for constraint violations                   │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-                            ▼
-                List[MinerScore] (ranked)
-```
-
-### 4. Weight Publishing (Validator)
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Validator publishes results to network                       │
-│                                                              │
-│  1. Normalize scores to weights (sum = 1.0)                 │
-│  2. Set weights on Bittensor chain                          │
-│     subtensor.set_weights(uids, weights)                    │
-│                                                              │
-│  3. Save winning strategy to file                           │
-│     winning_strategy.json                                   │
-│     {                                                        │
-│       "winner": { uid, hotkey, scores },                    │
-│       "strategy": { positions, rebalance_rule },            │
-│       "metadata": { version, model_info }                   │
-│     }                                                        │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 5. Strategy Execution (Subnet Owner)
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Executor Bot deploys winning strategy                        │
-│                                                              │
-│  MVP (Manual):                                               │
-│  1. Read winning_strategy.json                              │
-│  2. Convert positions to v3 NFT operations                  │
-│  3. Submit to multisig for approval                         │
-│  4. Execute on-chain (mint/burn/collect)                    │
-│                                                              │
-│  Future (Automated):                                         │
-│  1. Automated validation and execution                      │
-│  2. Real-time monitoring and adjustment                     │
-│  3. Emergency stop mechanisms                               │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Database Schema
-
-### pool_events Table
-
-The core data source for backtesting and strategy generation.
-
-```sql
-CREATE TABLE pool_events (
-    id BIGSERIAL PRIMARY KEY,
-    block_number BIGINT NOT NULL,
-    transaction_hash VARCHAR(66) NOT NULL,
-    log_index INTEGER NOT NULL,
-    pool_address VARCHAR(42) NOT NULL,
-    event_type VARCHAR(32) NOT NULL,    -- 'swap', 'mint', 'burn', 'collect'
-    event_data JSONB NOT NULL,          -- Event-specific fields
-    timestamp BIGINT NOT NULL,
-    owner_address VARCHAR(42),          -- For tracking vault ownership
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-### Event Types and Data Structures
-
-**Swap Event:**
-```json
-{
-  "amount0": "-1000000000000000000",
-  "amount1": "2500000000",
-  "sqrtPriceX96": "1234567890123456789012345",
-  "liquidity": "1000000000000000000",
-  "tick": -9200
+```python
+Job {
+    job_id: str                           # Unique identifier
+    sn_liquditiy_manager_address: str     # Vault managing liquidity
+    pair_address: str                     # Trading pair (e.g., ETH/USDC)
+    target: str                           # What is the target of the job.
+    chain_id: int                         # 8453 for Base
+    round_duration_seconds: int           # Configurable (default: 900s = 15min)
+    is_active: bool                       # Job enabled/disabled
 }
 ```
 
-**Mint Event (Add Liquidity):**
-```json
-{
-  "owner": "0x...",
-  "tickLower": -10000,
-  "tickUpper": -9000,
-  "amount0": "1000000000000000000",
-  "amount1": "2500000000",
-  "liquidity": "1234567890"
-}
-```
+### Parallel Job Execution
 
-**Collect Event (Claim Fees):**
-```json
-{
-  "owner": "0x...",
-  "tickLower": -10000,
-  "tickUpper": -9000,
-  "amount0": "10000000000000000",
-  "amount1": "25000000"
-}
-```
-
-## Scoring Algorithm Details
-
-### Performance Score (70%)
+The validator uses **asyncio** to run multiple jobs simultaneously:
 
 ```python
-def calculate_performance_scores(miner_metrics):
-    # 1. Extract Net PnL vs HODL for all miners
-    pnl_scores = {uid: metrics.net_pnl_vs_hodl for uid, metrics in miner_metrics}
-
-    # 2. Sort by PnL (descending)
-    sorted_miners = sorted(pnl_scores.items(), key=lambda x: x[1], reverse=True)
-
-    # 3. Top N get full weight (normalized 0.5-1.0)
-    top_n = sorted_miners[:3]
-    for uid, pnl in top_n:
-        score = normalize(pnl, min_pnl, max_pnl)  # 0.5 to 1.0
-        performance_scores[uid] = max(0.5, score)
-
-    # 4. Remaining miners get exponential decay
-    for rank, (uid, pnl) in enumerate(sorted_miners[3:], start=3):
-        decay = 0.5 ** ((rank - 3) / 5)
-        score = 0.4 * decay  # Max 0.4, decays quickly
-        if pnl > 0:  # Bonus for positive PnL
-            score = max(score, 0.1)
-        performance_scores[uid] = score
-
-    return performance_scores
+┌─────────────────────────────────────────────────────────┐
+│              Validator Main Loop (Async)                │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  Job 1 (ETH/USDC)    Job 2 (WBTC/USDC)   Job 3 (AERO)  │
+│       │                    │                   │        │
+│       ├─ Eval Round        ├─ Eval Round       ├─ Eval  │
+│       │  (All Miners)      │  (All Miners)     │        │
+│       │                    │                   │        │
+│       ├─ Live Round        ├─ Live Round       ├─ Live  │
+│       │  (Winner)          │  (Winner)         │        │
+│       │                    │                   │        │
+│       ▼                    ▼                   ▼        │
+│   Concurrent               Concurrent          Concurrent│
+│   Every 15min              Every 15min         Every 15m│
+└─────────────────────────────────────────────────────────┘
 ```
 
-### LP Alignment Score (30%)
+### Dual-Mode Operation
 
+Each job runs **two types of rounds simultaneously**:
+
+#### 1. Evaluation Mode (All Miners)
+```
+Purpose:     Test miner strategies in forward simulation
+Participants: ALL active miners
+Timeout:     60 seconds per miner response
+Duration:    Configurable (default: 15min)
+Evaluation:  Forward simulation from chainhead (current blockchain state)
+Scoring:     evaluation_score (EMA: 0.9×old + 0.1×new)
+Winner:      Best performing strategy → eligible for live
+```
+
+#### 2. Live Mode (Winner Only)
+```
+Purpose:     Execute real positions on-chain
+Participants: Previous evaluation round winner
+Requirement: 7+ days participation history
+Duration:    Same as evaluation (15min)
+Evaluation:  Actual on-chain performance over the round duration
+Scoring:     live_score (EMA: 0.7×old + 0.3×new)
+Weight:      Higher weight in combined score
+```
+
+**Combined Score:**
 ```python
-def calculate_lp_alignment_scores(vault_fees):
-    total_fees = sum(vault_fees.values())
-
-    if total_fees == 0:
-        return {uid: 0.0 for uid in vault_fees}
-
-    # Pro-rata based on fee contribution
-    return {
-        uid: fees / total_fees
-        for uid, fees in vault_fees.items()
-    }
+combined_score = (evaluation_score × 0.6) + (live_score × 0.4)
 ```
 
-### Final Score
+## Rebalance-Only Protocol
 
+The validator uses a **rebalance-only protocol** where:
+
+1. **Validator runs forward simulation** starting from current chainhead (live blockchain state)
+2. **At regular checkpoints** (configurable interval), validator queries miners with RebalanceQuery:
+   ```python
+   # Request fields (sent by validator)
+   RebalanceQuery {
+       job_id: str
+       sn_liquidity_manager_address: str
+       pair_address: str
+       chain_id: int
+       round_id: str
+       round_type: str                   # 'evaluation' or 'live'
+       block_number: int
+       current_price: float
+       current_positions: List[Position]
+       inventory_remaining: Inventory
+       # ... other context
+   }
+   ```
+3. **Miners populate response fields on the same synapse:**
+   ```python
+   # Response fields (populated by miner)
+   RebalanceQuery {
+       accepted: bool                        # Accept/refuse job
+       refusal_reason: Optional[str]         # Why refused (if accepted=False)
+       desired_positions: List[Position]     # Desired positions (required if accepted=True)
+       miner_metadata: MinerMetadata         # Miner version and model info
+   }
+   ```
+4. **Validator updates simulation** based on miner decisions:
+   - If `accepted=False`: Skip miner for entire round
+   - If `desired_positions == current_positions`: No rebalance (keep current)
+   - If `desired_positions != current_positions`: Rebalance to new positions
+
+### Miner Flexibility
+
+Miners can:
+- **Refuse jobs** they don't want to work on (`accepted=False`)
+- **Keep current positions** (return `current_positions` as `desired_positions`)
+- **Rebalance to new positions** (return new positions as `desired_positions`)
+- **Specialize** in certain pairs/strategies per job
+
+## Round Flow Diagram
+
+### Evaluation Round
+```
+┌────────────────────────────────────────────────────────────┐
+│ Start Round (t=0)                                          │
+├────────────────────────────────────────────────────────────┤
+│                                                            │
+│ 1. Get current chainhead (latest block)                   │
+│ 2. Get current on-chain positions for the vault           │
+│                                                            │
+│ ┌────────────────────────────────────────────────────────┐│
+│ │ For Each Miner (Parallel):                            ││
+│ │                                                        ││
+│ │   ┌─────────────────────────────────────────┐        ││
+│ │   │ Forward Simulation (15min duration)     │        ││
+│ │   │                                          │        ││
+│ │   │  Starting from: chainhead state          │        ││
+│ │   │    │                                     │        ││
+│ │   │    ├─ Checkpoint (periodic intervals)   │        ││
+│ │   │    │   ├─ Query miner (RebalanceQuery)  │        ││
+│ │   │    │   ├─ Wait for response (60s max)   │        ││
+│ │   │    │   │                                 │        ││
+│ │   │    │   ├─ If refused: skip miner        │        ││
+│ │   │    │   ├─ If rebalance: update positions│        ││
+│ │   │    │   └─ Else: continue                 │        ││
+│ │   │    │                                     │        ││
+│ │   │    └─ Track performance metrics          │        ││
+│ │   │       (expected PnL, fees, IL, etc.)    │        ││
+│ │   │                                          │        ││
+│ │   └──────────────────────────────────────────┘        ││
+│ │                                                        ││
+│ └────────────────────────────────────────────────────────┘│
+│                                                            │
+│ 4. Score all miners (rank by expected performance)        │
+│ 5. Select winner (best strategy)                          │
+│ 6. Update miner scores (EMA: 0.9×old + 0.1×new)          │
+│ 7. Update participation tracking                          │
+│ 8. Store results in database                              │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Live Round
+```
+┌───────────────────────────────────────────────────────────┐
+│ Start Round (t=0)                                         │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│ 1. Get previous evaluation winner                         │
+│ 2. Check eligibility:                                     │
+│    - 7+ days participation?                               │
+│                                                           │
+│ 3. If not eligible → Skip live round                      │
+│ 4. Periodically (every 150 blocks) ask for rebalancing.   │
+│ 6. Send rebalance decisions to executor bot               │
+│ 7. Track on-chain execution                               │
+│ 8. Update live_score (EMA: 0.7×old + 0.3×new)             │
+│ 9. Recalculate combined_score                             │
+└───────────────────────────────────────────────────────────┘
+```
+
+## Database Architecture
+
+### Two-Database Design
+
+SN98 uses **two separate databases**:
+
+#### 1. Jobs Database (Read/Write - Tortoise ORM)
+```
+Purpose:  Validator state, rounds, scores
+ORM:      Tortoise ORM (async)
+Tables:
+  - jobs               # Active liquidity tasks
+  - rounds             # Evaluation/live rounds
+  - predictions        # Miner decisions per round
+  - miner_scores       # Reputation per job
+  - miner_participation # Daily participation
+  - live_executions    # On-chain records
+```
+
+#### 2. Pool Events Database
+```
+Purpose:  Historical on-chain events for backtesting
+Source:   Subgraph indexer (external)
+Tables:
+  - swaps     # Swap events with price/tick
+  - mints     # Liquidity additions
+  - burns     # Liquidity removals
+  - collects  # Fee collections
+```
+
+**Connection Management:**
 ```python
-final_score = (performance_score * 0.7) + (lp_alignment_score * 0.3)
+# Jobs database
+await init_db(JOBS_DB_URL)
 
-# Apply constraint violations
-if has_violations:
-    final_score = 0.0
+# Pool events database
+await init_pool_events_db(POOL_EVENTS_DB_URL)
+
+# Both use async Tortoise ORM
+# All queries use async/await
 ```
 
-## Uniswap V3 Math
+## Key Features
 
-### Tick to Price Conversion
+### 1. Concurrent Execution
+- Multiple jobs run simultaneously
+- Each job runs eval + live rounds concurrently
+- All database operations are async (Tortoise ORM)
+- Miner queries parallelized within each round
 
-```python
-price = 1.0001 ** tick
+### 2. Reputation System
+- **Per-job scoring** (not global)
+- **Historical tracking** using exponential moving averages
+- **Weighted scoring** (evaluation vs live)
+- **Participation requirements** for live eligibility
+
+### 3. Graceful Degradation
+- Miners can refuse jobs without penalty
+- Timeout handling for slow/unresponsive miners
+- Continue with remaining miners if some fail
+- Skip live rounds if winner unavailable
+
+### 4. Flexibility
+- Miners choose which jobs to work on
+- Dynamic rebalancing during simulation
+- Multiple strategies can coexist
+- Job-specific specialization
+
+## Example Scenarios
+
+### Scenario 1: New Miner Joins Network
+
+```
+Day 1:  Miner participates in evaluation rounds for all jobs
+        → Builds evaluation_score across multiple jobs
+
+Day 7:  After 7 days of consistent participation for ETH/USDC job
+        → Becomes eligible for live mode
+
+Day 8:  Wins evaluation round for ETH/USDC job
+        → Selected for next live round
+        → Strategy executed on-chain
+        → live_score starts building
+
+Week 2: Continues building reputation
+        → combined_score = (0.6 × eval) + (0.4 × live)
+        → Competes based on historical performance
 ```
 
-### Price to Tick Conversion
+### Scenario 2: Multiple Jobs Running
 
-```python
-tick = log(price) / log(1.0001)
+```
+Validator manages:
+  - Job 1: ETH/USDC   (0x123...)
+  - Job 2: WBTC/USDC  (0x456...)
+  - Job 3: AERO/ETH   (0x789...)
+
+All run concurrently:
+  ├─ ETH/USDC    → Eval round + Live round (every 15min)
+  ├─ WBTC/USDC   → Eval round + Live round (every 15min)
+  └─ AERO/ETH    → Eval round + Live round (every 15min)
+
+Miner A excels at ETH pairs → high score on Jobs 1 & 3
+Miner B excels at BTC pairs → high score on Job 2
 ```
 
-### Liquidity Calculation
+### Scenario 3: Miner Refuses Job
 
-For a position with tick range [tickLower, tickUpper]:
-
-```python
-# If current price < lower bound (all token0)
-L = amount0 * sqrt(P_upper) * sqrt(P_lower) / (sqrt(P_upper) - sqrt(P_lower))
-
-# If current price in range (both tokens)
-L0 = amount0 * sqrt(P) * sqrt(P_upper) / (sqrt(P_upper) - sqrt(P))
-L1 = amount1 / (sqrt(P) - sqrt(P_lower))
-L = min(L0, L1)
-
-# If current price > upper bound (all token1)
-L = amount1 / (sqrt(P_upper) - sqrt(P_lower))
 ```
+1. Validator queries Miner A for Job 2 (WBTC/USDC)
 
-## Security Considerations
+2. Miner A responds:
+   RebalanceQuery {
+     accepted: false,
+     refusal_reason: "Only working on ETH pairs",
+     desired_positions: [],  # Empty list when refusing
+     miner_metadata: { version: "1.0.0", model_info: "..." }
+   }
 
-### Validator Security
+3. Validator:
+   - Logs refusal
+   - Skips Miner A for entire round
+   - Continues with other miners
+   - No penalty to Miner A's scores for other jobs
 
-1. **Database Access**: Read-only credentials, public data only
-2. **Miner Requests**: Timeout mechanisms, rate limiting
-3. **Weight Setting**: Verified on-chain, immutable once set
-4. **Error Handling**: Graceful degradation, no partial states
-
-### Miner Security
-
-1. **Input Validation**: Validate all request fields
-2. **Resource Limits**: Prevent DoS through computation limits
-3. **Error Isolation**: Don't expose internal errors to validators
-4. **Rate Limiting**: Protect against spam requests
-
-### Executor Bot Security
-
-1. **Multisig Control**: Multiple parties must approve (MVP)
-2. **Validation**: Verify strategy before execution
-3. **Limits**: Maximum position sizes, IL thresholds
-4. **Emergency Stop**: Ability to pause system
-
-## Performance Optimization
-
-### Validator Optimization
-
-- **Parallel Miner Polling**: Query all miners concurrently
-- **Batch Database Queries**: Single query for all event data
-- **Caching**: Cache price data and historical events
-- **Incremental Backtesting**: Only compute new blocks
-
-### Miner Optimization
-
-- **Database Connection Pool**: Reuse connections
-- **Feature Caching**: Cache frequently used features
-- **Model Loading**: Load models once at startup
-- **Async Processing**: Non-blocking request handling
-
-## Monitoring and Observability
-
-### Key Metrics
-
-**Validator:**
-- Round completion time
-- Number of valid miner responses
-- Database query latency
-- Weight publishing success rate
-
-**Miner:**
-- Request latency (p50, p95, p99)
-- Strategy generation time
-- Database query count
-- Constraint violation rate
-
-**System:**
-- Top miner scores over time
-- Strategy diversity (position range distribution)
-- Vault TVL and fee generation
-- Network consensus rate
-
-## Future Enhancements
-
-1. **Multi-Chain Support**: Expand beyond Base to other chains
-2. **Multiple Pairs**: Support multiple trading pairs simultaneously
-3. **Dynamic Constraints**: Adjust constraints based on market conditions
-4. **Advanced Scoring**: Incorporate risk-adjusted metrics
-5. **Automated Execution**: Fully automated strategy deployment
-6. **Public Vaults**: Open vault creation and deposits
-
-## Development Guidelines
-
-See `CLAUDE.md` for detailed development guidelines and coding standards.
-
-## References
-
-- Technical Specification: `spec.md`
-- API Documentation: `validator/models.py`
-- Quick Start: `QUICKSTART.md`
-- User Guide: `README.md`
+4. Miner A continues participating in ETH/USDC job
+```

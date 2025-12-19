@@ -401,16 +401,16 @@ Or integrate it into the validator:
 
 ```python
 # In validator/main.py, replace the hardcoded inventory with:
-from validator.inventory import SnLiqManagerInventory
+from validator.liqmanager import SnLiqManager
 
-provider = SnLiqManagerInventory(
-    liquidity_manager_address=os.getenv("LIQUIDITY_MANAGER_ADDRESS"),
-    rpc_url=os.getenv("RPC_URL")
+provider = SnLiqManager(
+   liquidity_manager_address=os.getenv("LIQUIDITY_MANAGER_ADDRESS"),
+   rpc_url=os.getenv("RPC_URL")
 )
 
 inventory = provider.get_inventory(
-    pair_address=config['pair_address'],
-    chain_id=config['chain_id']
+   pair_address=config['pair_address'],
+   chain_id=config['chain_id']
 )
 ```
 

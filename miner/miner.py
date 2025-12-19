@@ -1,8 +1,9 @@
 """
 Miner implementation for SN98 ForeverMoney using Bittensor axon.
 
-This miner serves LP strategy requests from validators using Bittensor's
-dendrite/axon communication protocol.
+Uses rebalance-only protocol:
+- No StrategyRequest (removed)
+- Only RebalanceQuery for dynamic rebalancing decisions
 
 Usage:
     python -m miner.miner --wallet.name <wallet_name> --wallet.hotkey <hotkey_name>
@@ -10,37 +11,32 @@ Usage:
 import os
 import logging
 import argparse
+import time
 from typing import Optional, Tuple, Any
 import bittensor as bt
 from dotenv import load_dotenv
 
-from protocol import StrategyRequest, RebalanceQuery, Strategy
-from miner.models import MinerMetadata
-from validator.database import PoolDataDB
-from miner.strategy import SimpleStrategyGenerator
+from protocol.synapses import RebalanceQuery
 
 # Load environment
 load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 # Configuration
-MINER_VERSION = os.getenv('MINER_VERSION', '1.0.0-mvp')
-MODEL_INFO = os.getenv('MODEL_INFO', 'simple-rule-based')
+MINER_VERSION = os.getenv("MINER_VERSION", "0.1.0")
 
 
 class SN98Miner:
     """
-    SN98 ForeverMoney Miner using Bittensor axon.
+    SN98 ForeverMoney Miner using rebalance-only protocol.
 
-    Serves two endpoints:
-    1. StrategyRequest - Generate LP strategies
-    2. RebalanceQuery - Dynamic rebalancing decisions
+    Serves one endpoint:
+    - RebalanceQuery: Dynamic rebalancing decisions during backtesting
     """
 
     def __init__(
@@ -63,31 +59,11 @@ class SN98Miner:
 
         logger.info(f"Starting SN98 Miner v{MINER_VERSION}")
         logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
-        logger.info(f"Model: {MODEL_INFO}")
-
-        # Initialize database connection
-        self.db_connection: Optional[PoolDataDB] = None
-        db_connection_string = os.getenv('DB_CONNECTION_STRING')
-        if db_connection_string:
-            try:
-                self.db_connection = PoolDataDB(connection_string=db_connection_string)
-                logger.info("Database connection initialized")
-            except Exception as e:
-                logger.warning(f"Could not initialize database: {e}")
-
-        # Initialize strategy generator
-        self.strategy_generator = SimpleStrategyGenerator(db=self.db_connection)
 
         # Create and configure axon
         self.axon = bt.Axon(wallet=wallet, config=config)
 
-        # Attach forward functions to axon
-        self.axon.attach(
-            forward_fn=self.strategy_request_handler,
-            blacklist_fn=self.blacklist_strategy_request,
-            priority_fn=self.priority_strategy_request,
-        )
-
+        # Attach only RebalanceQuery handler
         self.axon.attach(
             forward_fn=self.rebalance_query_handler,
             blacklist_fn=self.blacklist_rebalance_query,
@@ -95,123 +71,57 @@ class SN98Miner:
         )
 
         logger.info(f"Axon created on port {self.axon.port}")
-
-    async def strategy_request_handler(self, synapse: StrategyRequest) -> StrategyRequest:
-        """
-        Handle StrategyRequest synapse from validators.
-
-        This replaces the /predict_strategy HTTP endpoint.
-
-        Args:
-            synapse: StrategyRequest synapse with request data
-
-        Returns:
-            StrategyRequest synapse with response data populated
-        """
-        try:
-            logger.info(
-                f"Received strategy request for pair {synapse.pair_address}, "
-                f"block {synapse.target_block}"
-            )
-
-            # Generate strategy using the existing strategy generator
-            strategy = self.strategy_generator.generate_strategy_from_synapse(synapse)
-
-            # Populate response fields in synapse
-            synapse.strategy = strategy
-            synapse.miner_metadata = MinerMetadata(
-                version=MINER_VERSION,
-                model_info=MODEL_INFO
-            )
-
-            logger.info(
-                f"Generated strategy with {len(strategy.positions)} positions"
-            )
-
-            return synapse
-
-        except Exception as e:
-            logger.error(f"Error processing strategy request: {e}", exc_info=True)
-            # Return synapse with None values to indicate error
-            synapse.strategy = None
-            synapse.miner_metadata = None
-            return synapse
+        logger.info(f"Serving RebalanceQuery endpoint only")
 
     async def rebalance_query_handler(self, synapse: RebalanceQuery) -> RebalanceQuery:
         """
         Handle RebalanceQuery synapse from validators.
 
-        This replaces the /should_rebalance HTTP endpoint.
+        The validator is running a backtest simulation and asking:
+        "At this block, with these positions, should I rebalance?"
+
+        Miners can:
+        1. Refuse the job entirely (accepted=False)
+        2. Keep current positions (new_positions=current_positions)
+        3. Rebalance to new positions (new_positions=[...])
 
         Args:
-            synapse: RebalanceQuery synapse with query data
+            synapse: RebalanceQuery synapse with simulation state
 
         Returns:
-            RebalanceQuery synapse with response data populated
+            RebalanceQuery synapse with response populated
         """
-        try:
-            logger.debug(
-                f"Rebalance check for block {synapse.block_number}, "
-                f"price {synapse.current_price:.2f}"
-            )
+        pass
 
-            # Determine if we should rebalance
-            should_rebal, new_positions, reason = (
-                self.strategy_generator.should_rebalance_from_synapse(synapse)
-            )
-
-            # Populate response fields in synapse
-            synapse.rebalance = should_rebal
-            synapse.new_positions = new_positions if should_rebal else None
-            synapse.reason = reason
-
-            return synapse
-
-        except Exception as e:
-            logger.error(f"Error processing rebalance query: {e}", exc_info=True)
-            # Return synapse with error indication
-            synapse.rebalance = False
-            synapse.new_positions = None
-            synapse.reason = f"Error: {str(e)}"
-            return synapse
-
-    def blacklist_strategy_request(self, synapse: StrategyRequest) -> Tuple[bool, str]:
+    def _should_accept_job(self, synapse: RebalanceQuery) -> Tuple[bool, Optional[str]]:
         """
-        Blacklist function for StrategyRequest.
+        Determine if miner should accept this job.
 
-        Can be used to filter requests based on hotkey, stake, etc.
+        Override this method to implement custom job filtering logic.
 
         Args:
-            synapse: StrategyRequest synapse
+            synapse: RebalanceQuery synapse
 
         Returns:
-            Tuple of (is_blacklisted, reason)
+            Tuple of (should_accept, refusal_reason)
         """
-        # Accept all requests for now
-        # In production, you might want to:
-        # - Check validator stake
-        # - Rate limit by hotkey
-        # - Verify signature
-        return False, ""
+        # By default, accept all jobs
+        # You can implement custom filtering logic here:
+        #
+        # Example 1: Only work on specific pairs
+        # accepted_pairs = ['0x123...', '0x456...']
+        # if synapse.pair_address not in accepted_pairs:
+        #     return False, "Only working on whitelisted pairs"
+        #
+        # Example 2: Only work on evaluation rounds
+        # if synapse.round_type == 'live':
+        #     return False, "Not participating in live rounds yet"
+        #
+        # Example 3: Check rebalance frequency (avoid spam)
+        # if synapse.rebalances_so_far >= 10:
+        #     return False, "Max rebalances reached"
 
-    def priority_strategy_request(self, synapse: StrategyRequest) -> float:
-        """
-        Priority function for StrategyRequest.
-
-        Higher priority requests are processed first.
-
-        Args:
-            synapse: StrategyRequest synapse
-
-        Returns:
-            Priority score (higher = more priority)
-        """
-        # Equal priority for all requests for now
-        # In production, you might prioritize by:
-        # - Validator stake
-        # - Historical payment
-        # - Request complexity
-        return 0.0
+        return True, None
 
     def blacklist_rebalance_query(self, synapse: RebalanceQuery) -> Tuple[bool, str]:
         """
@@ -263,7 +173,7 @@ class SN98Miner:
 
             # This blocks until interrupted
             bt.logging.info("Miner is running. Press Ctrl+C to stop.")
-            import time
+
             while True:
                 time.sleep(1)
 
@@ -287,84 +197,20 @@ def get_config():
     """
     parser = argparse.ArgumentParser(description="SN98 ForeverMoney Miner")
 
-    # Add wallet arguments
+    # Only essential arguments (wallet credentials)
+    parser.add_argument("--wallet.name", type=str, required=True, help="Wallet name")
     parser.add_argument(
-        "--wallet.name",
-        type=str,
-        default="default",
-        help="Name of wallet"
-    )
-    parser.add_argument(
-        "--wallet.hotkey",
-        type=str,
-        default="default",
-        help="Hotkey name"
+        "--wallet.hotkey", type=str, required=True, help="Wallet hotkey"
     )
 
-    # Add subtensor arguments
-    parser.add_argument(
-        "--subtensor.network",
-        type=str,
-        default="finney",
-        help="Bittensor network (finney, test, local)"
-    )
-    parser.add_argument(
-        "--subtensor.chain_endpoint",
-        type=str,
-        default=None,
-        help="Chain endpoint override"
-    )
-
-    # Add netuid
-    parser.add_argument(
-        "--netuid",
-        type=int,
-        default=98,
-        help="Network UID for SN98"
-    )
-
-    # Add axon arguments
-    parser.add_argument(
-        "--axon.port",
-        type=int,
-        default=None,
-        help="Port for axon server"
-    )
-    parser.add_argument(
-        "--axon.ip",
-        type=str,
-        default="0.0.0.0",
-        help="IP address for axon server"
-    )
-    parser.add_argument(
-        "--axon.external_ip",
-        type=str,
-        default=None,
-        help="External IP address for axon"
-    )
-
-    # Add logging
-    parser.add_argument(
-        "--logging.debug",
-        action="store_true",
-        default=False,
-        help="Enable debug logging"
-    )
-    parser.add_argument(
-        "--logging.trace",
-        action="store_true",
-        default=False,
-        help="Enable trace logging"
-    )
-
-    # Parse config
+    # Parse config with bt.config to get bittensor defaults
     config = bt.config(parser)
 
-    # Set up logging
-    if config.logging.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-    if config.logging.trace:
-        bt.logging.set_trace(True)
+    # Override with environment variables if set
+    if os.getenv("SUBTENSOR_NETWORK"):
+        config.subtensor.network = os.getenv("SUBTENSOR_NETWORK")
+    if os.getenv("NETUID"):
+        config.netuid = int(os.getenv("NETUID"))
 
     return config
 
@@ -374,7 +220,9 @@ def main():
     Main entry point for the miner.
 
     Usage:
-        python -m miner.miner --wallet.name <wallet_name> --wallet.hotkey <hotkey_name>
+        python -m miner.miner --wallet.name <wallet> --wallet.hotkey <hotkey>
+
+    All other configuration loaded from .env file.
     """
     # Get configuration
     config = get_config()
@@ -389,15 +237,15 @@ def main():
     subtensor = bt.subtensor(config=config)
     logger.info(f"Subtensor: {subtensor}")
 
-    # Create and run miner
+    # Create miner
     miner = SN98Miner(
         wallet=wallet,
         subtensor=subtensor,
         config=config,
     )
 
+    # Run miner (synchronous Bittensor serving)
     miner.run()
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

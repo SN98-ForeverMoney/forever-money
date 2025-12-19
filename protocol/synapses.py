@@ -1,117 +1,88 @@
 """
 Bittensor Synapse definitions for SN98 ForeverMoney subnet.
 
-Synapses define the request/response protocol between validators and miners
-using Bittensor's dendrite/axon communication pattern.
+The subnet uses a rebalance-only approach:
+1. Validator queries miners with RebalanceQuery, asking miners for their suggestion how to deploy the inventory.
+2. Miners decide how to deploy the inventory.
 """
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import bittensor as bt
 from pydantic import Field, BaseModel
 
-from protocol.models import (
-    Mode,
-    Inventory,
-    CurrentPosition,
-    Position,
-    Strategy,
-)
-from validator.models import ValidatorMetadata
+from protocol.models import Position
 
 
 class MinerMetadata(BaseModel):
     """Metadata about the miner's model."""
+
     version: str = Field(..., description="Miner version")
     model_info: str = Field(..., description="Model description")
-
-
-
-class StrategyRequest(bt.Synapse):
-    """
-    Synapse for requesting LP strategy generation from miners.
-
-    This replaces the HTTP POST /predict_strategy endpoint.
-
-    Request fields (sent by validator):
-        - pair_address: Trading pair address
-        - chain_id: Blockchain ID
-        - target_block: Block number for strategy
-        - mode: INVENTORY or POSITION mode
-        - inventory: Available tokens (if mode=INVENTORY)
-        - current_positions: Existing positions (if mode=POSITION)
-        - metadata: Round metadata and constraints
-        - postgres_access: Optional DB credentials
-
-    Response fields (returned by miner):
-        - strategy: Generated strategy with positions
-        - miner_metadata: Miner version and model info
-    """
-
-    # Request fields (inputs from validator)
-    pair_address: str = Field(..., description="Address of the trading pair")
-    chain_id: int = Field(8453, description="Chain ID (Base = 8453)")
-    target_block: int = Field(..., description="Target block number for strategy")
-    mode: Mode = Field(Mode.INVENTORY, description="Operation mode")
-    inventory: Optional[Inventory] = Field(None, description="Available inventory")
-    current_positions: Optional[List[CurrentPosition]] = Field(
-        default_factory=list, description="Existing positions"
-    )
-    metadata: Optional[ValidatorMetadata] = Field(
-        default=None, description="Round metadata and constraints"
-    )
-    postgres_access: Optional[Dict[str, Any]] = Field(
-        None, description="Database access credentials"
-    )
-
-    # Response fields (outputs from miner)
-    strategy: Optional[Strategy] = Field(None, description="Proposed strategy")
-    miner_metadata: Optional[MinerMetadata] = Field(None, description="Miner metadata")
-
-    def deserialize(self) -> "StrategyRequest":
-        """
-        Deserialize the synapse response.
-
-        This method is called by the dendrite after receiving a response
-        from the miner's axon.
-        """
-        return self
 
 
 class RebalanceQuery(bt.Synapse):
     """
     Synapse for querying miners about rebalance decisions during backtesting.
 
-    This replaces the HTTP POST /should_rebalance endpoint.
+    The validator:
+    1. Generates initial positions for a job
+    2. Simulates trading with those positions
+    3. Periodically queries miners with current state
+    4. Miners respond with new positions (or None to keep current positions)
 
-    Request fields (sent by validator during backtest):
+    Request fields (sent by validator):
+        - job_id: Job identifier
+        - sn_liquidity_manager_address: Vault managing the liquidity
+        - pair_address: Pool address
+        - chain_id: EVM Chain ID
+        - round_id: Round identifier
+        - round_type: 'evaluation' or 'live'
         - block_number: Current simulation block
         - current_price: Current price (token1/token0)
         - current_positions: Active LP positions
-        - pair_address: Pool address
-        - chain_id: Blockchain ID
-        - round_id: Round identifier
+        - inventory_remaining: Available tokens for new positions
+        - rebalances_so_far: Number of rebalances executed so far
 
     Response fields (returned by miner):
-        - rebalance: Whether to rebalance
-        - new_positions: New positions if rebalancing
-        - reason: Optional explanation
+        - accepted: Whether miner accepts this job
+        - refusal_reason: Reason if refused (only if accepted=False)
+        - new_positions: New positions to rebalance to (None = keep current positions)
+        - miner_metadata: Miner version and model info
     """
 
-    # Request fields (inputs from validator)
+    # Job context
+    job_id: str = Field(..., description="Job identifier")
+    sn_liquidity_manager_address: str = Field(
+        ..., description="Vault managing the liquidity"
+    )
+    pair_address: str = Field(..., description="Pool address")
+    chain_id: int = Field(8453, description="Chain ID (Base = 8453)")
+    round_id: str = Field(..., description="Round identifier")
+    round_type: str = Field(..., description="Round type: 'evaluation' or 'live'")
+
+    # Simulation state
     block_number: int = Field(..., description="Current block number in simulation")
     current_price: float = Field(..., description="Current price (token1/token0)")
     current_positions: List[Position] = Field(..., description="Current LP positions")
-    pair_address: str = Field(..., description="Pool address")
-    chain_id: int = Field(8453, description="Chain ID")
-    round_id: str = Field(..., description="Round identifier for context")
+    inventory_remaining: Optional[dict] = Field(
+        None, description="Available tokens (amount0, amount1)"
+    )
+    rebalances_so_far: int = Field(
+        0, description="Number of rebalances executed so far"
+    )
 
     # Response fields (outputs from miner)
-    rebalance: Optional[bool] = Field(None, description="Whether to rebalance")
-    new_positions: Optional[List[Position]] = Field(
-        None, description="New positions if rebalancing"
+    accepted: bool = Field(True, description="Whether miner accepts this job")
+    refusal_reason: Optional[str] = Field(
+        None, description="Reason for refusal if declined"
     )
-    reason: Optional[str] = Field(
-        None, description="Optional explanation for the decision"
+    desired_positions: Optional[List[Position]] = Field(
+        None,
+        description="Positions desired to be live. "
+        "Any existing positions not matching the "
+        "desired positions (up to 2% difference tolerance) will be burned.",
     )
+
+    miner_metadata: Optional[MinerMetadata] = Field(None, description="Miner metadata")
 
     def deserialize(self) -> "RebalanceQuery":
         """

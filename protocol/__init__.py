@@ -26,6 +26,7 @@ try:
         RebalanceQuery,
         MinerMetadata,
     )
+
     _SYNAPSES_AVAILABLE = True
 except ImportError:
     # Bittensor not available - synapses won't be available

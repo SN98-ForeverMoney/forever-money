@@ -65,14 +65,14 @@ def start_miner():
     # Start miner
     print("  Starting miner process...")
     env = os.environ.copy()
-    env['MINER_PORT'] = str(MINER_PORT)
+    env["MINER_PORT"] = str(MINER_PORT)
 
     process = subprocess.Popen(
-        ['python', '-m', 'miner.miner'],
+        ["python", "-m", "miner.miner"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=str(project_root),
-        env=env
+        env=env,
     )
 
     # Wait for startup
@@ -93,37 +93,43 @@ def run_validator():
     print_header("Running Validator")
 
     cmd = [
-        'python', '-m', 'validator.main',
-        '--wallet.name', 'test_validator',
-        '--wallet.hotkey', 'test_hotkey',
-        '--subtensor.network', 'test',
-        '--netuid', '98',
-        '--pair_address', PAIR_ADDRESS,
-        '--target_block', str(TARGET_BLOCK),
-        '--start_block', str(START_BLOCK),
-        '--test-miner', MINER_URL,
-        '--dry-run'
+        "python",
+        "-m",
+        "validator.main",
+        "--wallet.name",
+        "test_validator",
+        "--wallet.hotkey",
+        "test_hotkey",
+        "--subtensor.network",
+        "test",
+        "--netuid",
+        "98",
+        "--pair_address",
+        PAIR_ADDRESS,
+        "--target_block",
+        str(TARGET_BLOCK),
+        "--start_block",
+        str(START_BLOCK),
+        "--test-miner",
+        MINER_URL,
+        "--dry-run",
     ]
 
     print(f"  Command: {' '.join(cmd)}")
     print()
 
     result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=str(project_root),
-        timeout=120
+        cmd, capture_output=True, text=True, cwd=str(project_root), timeout=120
     )
 
     print("  STDOUT:")
-    for line in result.stdout.split('\n'):
+    for line in result.stdout.split("\n"):
         if line.strip():
             print(f"    {line}")
 
     if result.stderr:
         print("\n  STDERR:")
-        for line in result.stderr.split('\n'):
+        for line in result.stderr.split("\n"):
             if line.strip():
                 print(f"    {line}")
 
@@ -134,7 +140,7 @@ def verify_results():
     """Verify the winning strategy output."""
     print_header("Verifying Results")
 
-    strategy_file = project_root / 'winning_strategy.json'
+    strategy_file = project_root / "winning_strategy.json"
 
     if not strategy_file.exists():
         print("  ERROR: winning_strategy.json not found!")
@@ -146,10 +152,14 @@ def verify_results():
     print("  Winning Strategy:")
     print(f"    Miner UID: {strategy.get('winner', {}).get('miner_uid')}")
     print(f"    Final Score: {strategy.get('winner', {}).get('final_score', 0):.4f}")
-    print(f"    Performance Score: {strategy.get('winner', {}).get('performance_score', 0):.4f}")
-    print(f"    LP Score: {strategy.get('winner', {}).get('lp_alignment_score', 0):.4f}")
+    print(
+        f"    Performance Score: {strategy.get('winner', {}).get('performance_score', 0):.4f}"
+    )
+    print(
+        f"    LP Score: {strategy.get('winner', {}).get('lp_alignment_score', 0):.4f}"
+    )
 
-    positions = strategy.get('strategy', {}).get('positions', [])
+    positions = strategy.get("strategy", {}).get("positions", [])
     print(f"\n  Positions: {len(positions)}")
     for i, pos in enumerate(positions):
         print(f"    Position {i+1}:")
@@ -159,7 +169,7 @@ def verify_results():
         print(f"      Confidence: {pos.get('confidence')}")
 
     # Verify score is reasonable
-    score = strategy.get('winner', {}).get('final_score', 0)
+    score = strategy.get("winner", {}).get("final_score", 0)
     if score > 0:
         print("\n  PASS: Strategy has positive score")
         return True
@@ -219,5 +229,5 @@ def main():
         return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
