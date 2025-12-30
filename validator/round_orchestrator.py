@@ -255,7 +255,7 @@ class AsyncRoundOrchestrator:
                 round_=round_,
                 initial_positions=initial_positions,
                 start_block=start_block,
-                inventory=inventory,
+                initial_inventory=inventory,
                 rebalance_check_interval=self.rebalance_check_interval,
             )
             tasks.append(task)
@@ -307,7 +307,7 @@ class AsyncRoundOrchestrator:
         round_: Round,
         initial_positions: List[Position],
         start_block: int,
-        inventory: Inventory,
+        initial_inventory: Inventory,
         rebalance_check_interval: int = 50,
     ) -> Dict:
         """
@@ -319,7 +319,7 @@ class AsyncRoundOrchestrator:
             round_: The round object
             initial_positions: Initial positions to start with
             start_block: Start block
-            inventory: Available inventory
+            initial_inventory: Available inventory
             rebalance_check_interval: Check for rebalance every N blocks
 
         Returns:
@@ -337,7 +337,7 @@ class AsyncRoundOrchestrator:
         logger.info(f"[ROUND={round_.round_id}] Running backtest for miner {miner_uid}")
 
         # Track state
-        current_positions, current_inventory = initial_positions, inventory
+        current_positions, current_inventory = initial_positions, initial_inventory
         rebalance_history = []
         total_query_time_ms = 0
         rebalances_so_far = 0
@@ -423,8 +423,8 @@ class AsyncRoundOrchestrator:
                         total_amount_0_placed += actual_amount0_used
                         total_amount_1_placed += actual_amount1_used
 
-                    amount_0_int = int(inventory.amount0) - total_amount_0_placed
-                    amount_1_int = int(inventory.amount1) - total_amount_1_placed
+                    amount_0_int = int(initial_inventory.amount0) - total_amount_0_placed
+                    amount_1_int = int(initial_inventory.amount1) - total_amount_1_placed
                     if amount_0_int < 0 or amount_1_int < 0:
                         return {
                             "accepted": False,
@@ -463,7 +463,7 @@ class AsyncRoundOrchestrator:
             rebalance_history,
             start_block,
             current_block,
-            inventory,
+            initial_inventory,
             job.fee_rate,
         )
         logger.info(

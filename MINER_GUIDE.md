@@ -150,135 +150,203 @@ This is where you compete!
 
 **⚠️ IMPORTANT: Current Scoring Mechanism (PoL Target)**
 
-This scoring function applies to the **current implementation** where all jobs use the **"PoL" (Protocol Owned Liquidity)** target. In the future, each job will have its own target type (e.g., "MaxFees", "MinIL", "Balanced"), and scoring will be determined by the job's specific target. For now, all jobs optimize for Protocol Owned Liquidity balance.
+This scoring function applies to the **current implementation** where all jobs use the **"PoL" (Protocol Owned Liquidity)** target. In the future, each job will have its own target type (e.g., "MaxFees", "MinIL", "Balanced"), and scoring will be determined by the job's specific target. For now, all jobs optimize for Protocol Owned Liquidity inventory protection.
 
 ---
 
 ### The Scoring Function
 
-Your strategy is scored based on three key factors:
+Your strategy is scored based on two critical factors:
 
-1. **Total Value** - The combined value of your token holdings (amount0_holdings + amount1_holdings)
-2. **Ratio Discipline** - How well you maintain the target 50/50 balance between tokens
-3. **Fees Collected** - The total fees earned from liquidity provision
+1. **Value Growth** - Maximize portfolio value based on pool price appreciation and fees (primary signal)
+2. **Inventory Protection** - Protect initial token amounts through exponential penalty for losses
 
-The scoring function calculates your total portfolio value, applies a penalty for deviation from the 50/50 target ratio, and adds a small bonus for fees collected. The goal is to maintain a balanced portfolio while preserving capital and earning fees.
+The algorithm uses a smooth exponential penalty that:
+- **Reduces positive gains** when inventory is lost
+- **Amplifies negative losses** when inventory is lost
+- **No penalty** when all tokens are preserved
 
 ### How It Works
 
-#### 1. **Total Value** (Primary Driver)
+#### 1. **Calculate Value Gain** (Primary Signal)
 ```python
-total_value = amount0_holdings + amount1_holdings
-```
-- All values converted to same unit (token1/USD equivalent)
-- Higher total value = better (assuming similar balance)
+# Initial value (in token1 units, at initial price)
+initial_value = (initial_amount0 × initial_price) + initial_amount1
 
-#### 2. **Ratio Discipline** (Critical!)
+# Final value (in token1 units, at final price, including fees)
+final_value = (final_amount0 × final_price) + final_amount1 + fees
+
+# Value gain (can be positive or negative)
+value_gain = final_value - initial_value
+```
+- All values in token1 units using pool price
+- Includes all fees earned
+- This is your base score before penalty
+
+#### 2. **Measure Relative Inventory Losses**
 ```python
-target_ratio = 0.5  # 50% token0, 50% token1
-actual_ratio = amount0_holdings / total_value
-ratio_error = abs(actual_ratio - target_ratio) / target_ratio
+# Percentage of each token lost
+loss_ratio0 = (initial_amount0 - final_amount0) / initial_amount0
+loss_ratio1 = (initial_amount1 - final_amount1) / initial_amount1
 
-# Example:
-# Perfect balance: 50/50 → ratio_error = 0.0 → penalty = 1.0
-# Moderate drift:  60/40 → ratio_error = 0.2 → penalty = 0.96
-# Heavy drift:     80/20 → ratio_error = 0.6 → penalty = 0.74
-# Extreme drift:   90/10 → ratio_error = 0.8 → penalty = 0.61
+# Examples:
+# Lost 0 tokens → loss_ratio = 0.0 (0%)
+# Lost 10% of tokens → loss_ratio = 0.1 (10%)
+# Lost 50% of tokens → loss_ratio = 0.5 (50%)
 ```
+- Measures **percentage** of initial inventory lost
+- Calculated separately for each token
+- Zero if token amount increased
 
-**The ratio penalty is STRONG:**
-- Maintains 50/50: `penalty = 1.0` ✅
-- Drifts to 60/40: `penalty ≈ 0.96` ⚠️
-- Drifts to 70/30: `penalty ≈ 0.84` ❌
-- Drifts to 80/20: `penalty ≈ 0.74` ❌❌
-
-#### 3. **Core Score** (Capital × Balance)
+#### 3. **Aggregate Losses with Smooth-Max**
 ```python
-core_score = total_value * ratio_penalty
-```
-- Combines capital preservation with balance quality
-- You can have high capital BUT if imbalanced, score suffers
-- You can be perfectly balanced BUT if lost capital, score suffers
+# Smooth-max combines both loss ratios (like max but differentiable)
+inventory_loss_ratio = smooth_max(loss_ratio0, loss_ratio1)
 
-#### 4. **Fees Bonus** (Secondary)
-```python
-fee_weight = 0.1  # Fees are 10% weight
-score = core_score + (0.1 × fees_collected)
+# Approximates max(loss_ratio0, loss_ratio1) but considers both
 ```
-- Fees provide a **small boost** to your score
-- But they DON'T compensate for poor balance or capital loss
-- Prioritize balance and capital preservation first!
+- Uses log-sum-exp aggregation
+- Focuses on the **worse** loss but considers both
+- Smooth and always rankable
+
+#### 4. **Apply Exponential Penalty**
+```python
+# Exponential penalty factor (default multiplier = 10)
+penalty_factor = exp(-10 × inventory_loss_ratio)
+
+# Examples:
+# 0% loss  → penalty_factor = exp(0) = 1.000 (no penalty)
+# 5% loss  → penalty_factor = exp(-0.5) ≈ 0.606
+# 10% loss → penalty_factor = exp(-1.0) ≈ 0.368
+# 20% loss → penalty_factor = exp(-2.0) ≈ 0.135
+# 50% loss → penalty_factor = exp(-5.0) ≈ 0.007
+```
+- Penalty grows **exponentially** with inventory loss
+- Even small losses create significant penalty
+- Large losses nearly eliminate your score
+
+#### 5. **Symmetric Penalty Application**
+```python
+if value_gain >= 0:
+    # Positive gains → multiply by penalty (reduces gain)
+    score = value_gain × penalty_factor
+else:
+    # Negative losses → divide by penalty (amplifies loss)
+    score = value_gain / penalty_factor
+```
+
+**Why symmetric?**
+- Losing inventory while gaining value → gain is reduced
+- Losing inventory while losing value → loss is amplified
+- Either way, inventory loss hurts!
 
 ### Practical Examples
 
-#### Example 1: Perfect Strategy ✅
+#### Example 1: Perfect Strategy - No Inventory Loss ✅✅✅
 ```python
-# Started with: $10,000 (50/50)
-# Ended with:   $10,500 (50/50) + $200 fees
+# Initial
+initial_amount0 = 1000 tokens
+initial_amount1 = 2000 tokens
+initial_value = $12,000
 
-amount0_holdings = 5,250  # 50%
-amount1_holdings = 5,250  # 50%
-fees_collected = 200
+# Final (no token losses!)
+final_amount0 = 1000 tokens  # Preserved ✅
+final_amount1 = 2000 tokens  # Preserved ✅
+final_value = $14,200 (includes $200 fees)
 
-total_value = 10,500
-actual_ratio = 5,250 / 10,500 = 0.5  # Perfect!
-ratio_error = 0.0
-ratio_penalty = 1.0
+# Scoring
+loss_ratio0 = 0.0
+loss_ratio1 = 0.0
+inventory_loss_ratio = 0.0
+penalty_factor = exp(0) = 1.0
 
-core_score = 10,500 × 1.0 = 10,500
-score = 10,500 + (0.1 × 200) = 10,520 ✅
+value_gain = 14,200 - 12,000 = 2,200
+score = 2,200 × 1.0 = 2,200 ✅✅✅
 ```
 
-#### Example 2: High Fees, Bad Balance ❌
+#### Example 2: Good Gains BUT Lost 10% of Token0 ⚠️
 ```python
-# Started with: $10,000 (50/50)
-# Ended with:   $10,200 (80/20) + $500 fees (from narrow range)
+# Initial
+initial_amount0 = 1000 tokens
+initial_amount1 = 2000 tokens
+initial_value = $12,000
 
-amount0_holdings = 8,160  # 80% - IMBALANCED!
-amount1_holdings = 2,040  # 20%
-fees_collected = 500
+# Final (lost 10% of token0)
+final_amount0 = 900 tokens   # Lost 10%! ❌
+final_amount1 = 2000 tokens  # Preserved
+final_value = $15,800 (price up + fees)
 
-total_value = 10,200
-actual_ratio = 8,160 / 10,200 = 0.8
-ratio_error = |0.8 - 0.5| / 0.5 = 0.6
-ratio_penalty = 1 / (1 + 0.6²) = 1 / 1.36 ≈ 0.74
+# Scoring
+loss_ratio0 = (1000 - 900) / 1000 = 0.1 (10%)
+loss_ratio1 = 0.0
+inventory_loss_ratio ≈ 0.1
+penalty_factor = exp(-10 × 0.1) = exp(-1) ≈ 0.368
 
-core_score = 10,200 × 0.74 = 7,548
-score = 7,548 + (0.1 × 500) = 7,598 ❌
+value_gain = 15,800 - 12,000 = 3,800
+score = 3,800 × 0.368 ≈ 1,398 ⚠️
 
-# Despite higher fees and higher total value,
-# the imbalance penalty kills the score!
+# Gained $3,800 but lost 10% tokens → score reduced by 63%!
 ```
 
-#### Example 3: Good Balance, Capital Loss ❌
+#### Example 3: Lost Value AND Lost 10% Tokens ❌❌❌
 ```python
-# Started with: $10,000 (50/50)
-# Ended with:   $9,000 (50/50) + $100 fees
+# Initial
+initial_amount0 = 1000 tokens
+initial_amount1 = 2000 tokens
+initial_value = $12,000
 
-amount0_holdings = 4,500  # 50% - Good balance
-amount1_holdings = 4,500  # 50%
-fees_collected = 100
+# Final (bad all around)
+final_amount0 = 900 tokens   # Lost 10%! ❌
+final_amount1 = 2000 tokens
+final_value = $11,000 (price down)
 
-total_value = 9,000
-actual_ratio = 0.5
-ratio_penalty = 1.0
+# Scoring
+loss_ratio0 = 0.1
+inventory_loss_ratio ≈ 0.1
+penalty_factor = exp(-1) ≈ 0.368
 
-core_score = 9,000 × 1.0 = 9,000
-score = 9,000 + (0.1 × 100) = 9,010 ❌
+value_gain = 11,000 - 12,000 = -1,000
+score = -1,000 / 0.368 ≈ -2,717 ❌❌❌
 
-# Good balance but lost capital (IL or poor positioning)
+# Lost $1,000 AND lost 10% tokens → loss amplified by 2.7x!
+```
+
+#### Example 4: Lost 50% of Tokens (Catastrophic) ☠️
+```python
+# Even with positive value gain
+loss_ratio = 0.5
+penalty_factor = exp(-10 × 0.5) = exp(-5) ≈ 0.0067
+
+value_gain = 5,000  # Good gain!
+score = 5,000 × 0.0067 ≈ 33.5 ☠️
+
+# $5,000 gain → reduced to $33 due to 50% inventory loss!
 ```
 
 ### Key Takeaways for Miners
 
-#### 1. **Balance is CRITICAL** 🎯
-- Aim for 50/50 token ratio at all times
+#### 1. **PROTECT YOUR INVENTORY** 🛡️
+- Even **5-10% token loss** severely impacts score
+- 10% loss → 63% score reduction
+- 50% loss → 99% score reduction
+- **Zero tolerance** for inventory loss!
 
-#### 2. **Capital Preservation Matters** 💰
-- Minimize impermanent loss
+#### 2. **The Penalty is Exponential** 📉
+- Small losses (5%) → moderate penalty
+- Medium losses (10-20%) → severe penalty
+- Large losses (>30%) → catastrophic penalty
+- **Non-linear** - gets worse fast!
 
-#### 3. **Fees are Secondary** 💵
-- Fees only provide 10% weight in score
+#### 3. **Penalty Applies Both Ways** ⚔️
+- Gains + loss → gains reduced
+- Losses + inventory loss → losses amplified
+- **Double punishment** when both go wrong
+
+#### 4. **Focus on Preservation First** 🎯
+- Better to preserve inventory with small gain
+- Than to chase high gains and lose tokens
+- Wide ranges, conservative rebalancing
+- **Capital preservation >> aggressive fees**
 
 ### Score Updates (Exponential Moving Average)
 
@@ -347,14 +415,5 @@ tail -f miner.log
 # - Your decisions (rebalance/keep)
 # - Any errors
 ```
-
-## Resources
-
-- **ARCHITECTURE.md** - System architecture overview
-- **JOBS_ARCHITECTURE.md** - Detailed jobs system
-- **Protocol Models** - `protocol/models.py` and `protocol/synapses.py`
-- **Backtester** - `validator/backtester.py` to understand scoring
-- **Database** - `validator/database.py` for historical data access
-
 
 **Good luck and happy mining! 🚀**

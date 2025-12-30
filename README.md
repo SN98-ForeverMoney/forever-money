@@ -19,15 +19,16 @@ Validators run multiple jobs (liquidity management tasks) concurrently. For each
 
 1. **Evaluation Rounds** - All miners compete in forward simulations from current blockchain state
 2. **Live Rounds** - Winning miners (after 7 days participation) execute strategies on-chain
-3. **Scoring** - Miners scored on portfolio value, 50/50 balance maintenance, and fees
+3. **Scoring** - Miners scored on absolute inventory protection and value growth
 4. **Reputation** - Build per-job scores through exponential moving averages
 
 **Current Scoring (PoL Target):**
-- Maintain 50/50 token balance (critical!)
-- Preserve capital (minimize impermanent loss)
-- Collect fees (secondary, 10% weight)
+- Maximize value growth from pool price appreciation and fees (primary signal)
+- Smooth exponential penalty for losing inventory (% of tokens lost)
+- Score = value_gain × exp(-10 × loss%) if gaining, value_gain / exp(-10 × loss%) if losing
+- 10% inventory loss → 63% score reduction; 50% loss → 99% reduction
 
-For detailed system architecture, round flows, and database design, see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
+For detailed system architecture see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 ## For Miners
 
