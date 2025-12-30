@@ -12,18 +12,21 @@ from enum import Enum
 
 class Mode(str, Enum):
     """Operation mode for strategy request."""
+
     INVENTORY = "inventory"
     POSITION = "position"
 
 
 class Inventory(BaseModel):
     """Inventory of tokens available for deployment."""
+
     amount0: str = Field(..., description="Amount of token0 in wei")
     amount1: str = Field(..., description="Amount of token1 in wei")
 
 
 class CurrentPosition(BaseModel):
     """Existing v3 LP position."""
+
     tick_lower: int = Field(..., description="Lower tick of position")
     tick_upper: int = Field(..., description="Upper tick of position")
     liquidity: str = Field(..., description="Liquidity amount")
@@ -31,6 +34,7 @@ class CurrentPosition(BaseModel):
 
 class Position(BaseModel):
     """A single v3 LP position."""
+
     tick_lower: int = Field(..., description="Lower tick bound")
     tick_upper: int = Field(..., description="Upper tick bound")
     allocation0: str = Field(..., description="Amount of token0 to allocate")
@@ -39,8 +43,8 @@ class Position(BaseModel):
         None, ge=0.0, le=1.0, description="Confidence score (0-1)"
     )
 
-    @model_validator(mode='after')
-    def validate_tick_range(self) -> 'Position':
+    @model_validator(mode="after")
+    def validate_tick_range(self) -> "Position":
         """Ensure tick_upper > tick_lower."""
         if self.tick_upper <= self.tick_lower:
             raise ValueError("tick_upper must be greater than tick_lower")
@@ -49,12 +53,16 @@ class Position(BaseModel):
 
 class RebalanceRule(BaseModel):
     """Optional rebalance rule for the strategy."""
-    trigger: str = Field(..., description="Trigger condition (e.g., 'price_outside_range')")
+
+    trigger: str = Field(
+        ..., description="Trigger condition (e.g., 'price_outside_range')"
+    )
     cooldown_blocks: int = Field(..., description="Minimum blocks between rebalances")
 
 
 class Strategy(BaseModel):
     """Complete strategy output from miner."""
+
     positions: List[Position] = Field(..., description="List of LP positions")
     rebalance_rule: Optional[RebalanceRule] = Field(
         None, description="Optional rebalance rule"
@@ -63,6 +71,7 @@ class Strategy(BaseModel):
 
 class PerformanceMetrics(BaseModel):
     """Performance metrics for a strategy."""
+
     net_pnl: float = Field(..., description="Net PnL in base currency")
     hodl_pnl: float = Field(..., description="HODL baseline PnL")
     net_pnl_vs_hodl: float = Field(..., description="Net PnL vs HODL")

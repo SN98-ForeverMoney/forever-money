@@ -1,31 +1,15 @@
 """
-SN98 ForeverMoney Validator Package
+SN98 ForeverMoney Validator Package - Jobs-Based Architecture
 
-Note: SN98Validator is NOT imported here to avoid requiring bittensor
-for the miner package. Import it directly from validator.validator if needed.
+Async validator using Tortoise ORM and rebalance-only protocol.
 """
-from validator.database import PoolDataDB
-from validator.backtester import Backtester
-from validator.scorer import Scorer
-from validator.constraints import ConstraintValidator
-from validator.inventory import (
-    InventoryProvider,
-    SnLiqManagerInventory,
-    StaticInventory
-)
-
-# Models can be imported from validator.models
-# from validator.models import (
-#     ValidatorRequest, MinerScore, Metadata,
-#     Constraints, RebalanceRequest
-# )
+from validator.repositories.job import JobRepository
+from validator.round_orchestrator import AsyncRoundOrchestrator
+from validator.models.job import init_db, close_db
 
 __all__ = [
-    'PoolDataDB',
-    'Backtester',
-    'Scorer',
-    'ConstraintValidator',
-    'InventoryProvider',
-    'SnLiqManagerInventory',
-    'StaticInventory',
+    "JobRepository",
+    "AsyncRoundOrchestrator",
+    "init_db",
+    "close_db",
 ]

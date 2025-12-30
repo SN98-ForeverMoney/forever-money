@@ -185,6 +185,7 @@ btcli subnet show --netuid 2 --network ws://127.0.0.1:9945
 - Validator staked with sufficient TAO for validator permit
 
 ## Quick Start Commands
+#todo: update this section  
 
 ### 1. Environment Setup
 
@@ -401,16 +402,16 @@ Or integrate it into the validator:
 
 ```python
 # In validator/main.py, replace the hardcoded inventory with:
-from validator.inventory import SnLiqManagerInventory
+from validator.services.liqmanager import SnLiqManagerService
 
-provider = SnLiqManagerInventory(
-    liquidity_manager_address=os.getenv("LIQUIDITY_MANAGER_ADDRESS"),
-    rpc_url=os.getenv("RPC_URL")
+provider = SnLiqManagerService(
+   liquidity_manager_address=os.getenv("LIQUIDITY_MANAGER_ADDRESS"),
+   rpc_url=os.getenv("RPC_URL")
 )
 
 inventory = provider.get_inventory(
-    pair_address=config['pair_address'],
-    chain_id=config['chain_id']
+   pair_address=config['pair_address'],
+   chain_id=config['chain_id']
 )
 ```
 

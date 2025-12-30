@@ -2,6 +2,7 @@
 
 # Bittensor
 bittensor>=6.0.0
+bittensor-cli>=9.0.0
 
 # Web framework for miner
 flask>=3.0.0
@@ -11,7 +12,8 @@ tenacity>=8.2.0
 
 # Database
 psycopg2-binary>=2.9.9
-sqlalchemy>=2.0.0
+tortoise-orm>=0.25.3,<0.30.0
+asyncpg>=0.29.0
 
 # Data processing
 pandas>=2.1.0

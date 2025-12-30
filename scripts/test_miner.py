@@ -44,7 +44,7 @@ def test_miner_via_dendrite(miner_address: str = "127.0.0.1:8091"):
     print("=" * 60)
 
     # Parse miner address
-    parts = miner_address.split(':')
+    parts = miner_address.split(":")
     miner_ip = parts[0] if parts else "127.0.0.1"
     miner_port = int(parts[1]) if len(parts) > 1 else 8091
 
@@ -81,17 +81,12 @@ def test_miner_via_dendrite(miner_address: str = "127.0.0.1:8091"):
         target_block=38634763,
         mode=Mode.INVENTORY,
         inventory=Inventory(
-            amount0="1000000000000000000",  # 1 ETH
-            amount1="2500000000"  # 2500 USDC
+            amount0="1000000000000000000", amount1="2500000000"  # 1 ETH  # 2500 USDC
         ),
         current_positions=[],
         metadata=ValidatorMetadata(
             round_id="test-round-001",
-            constraints=Constraints(
-                max_il=0.10,
-                min_tick_width=60,
-                max_rebalances=4
-            )
+            constraints=Constraints(max_il=0.10, min_tick_width=60, max_rebalances=4),
         ),
     )
     print(f"   Request created for pair: {synapse.pair_address}")
@@ -114,7 +109,9 @@ def test_miner_via_dendrite(miner_address: str = "127.0.0.1:8091"):
             print(f"   Miner version: {response.miner_metadata.version}")
             print(f"   Model info: {response.miner_metadata.model_info}")
             print(f"   Number of positions: {len(response.strategy.positions)}")
-            print(f"   Has rebalance rule: {response.strategy.rebalance_rule is not None}")
+            print(
+                f"   Has rebalance rule: {response.strategy.rebalance_rule is not None}"
+            )
 
             # Validate positions
             print(f"\n5. Validating positions:")
@@ -139,12 +136,13 @@ def test_miner_via_dendrite(miner_address: str = "127.0.0.1:8091"):
     except Exception as e:
         print(f"   ✗ Error querying miner: {e}")
         import traceback
+
         traceback.print_exc()
         return False
 
 
-if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help']:
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ["-h", "--help"]:
         print(__doc__)
         sys.exit(0)
 
