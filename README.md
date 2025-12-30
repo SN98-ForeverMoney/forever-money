@@ -77,4 +77,4 @@ This is an active Bittensor subnet. Contributions are welcome:
 
 ## License
 
-TBD
+MIT License - see [LICENSE](./LICENSE) file for details
