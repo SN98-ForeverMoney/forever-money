@@ -43,7 +43,7 @@ class Job(Model):
 
     id = fields.IntField(pk=True)
     job_id = fields.CharField(max_length=255, unique=True, index=True)
-    sn_liquditiy_manager_address = fields.CharField(max_length=42)
+    sn_liquidity_manager_address = fields.CharField(max_length=42)
     pair_address = fields.CharField(max_length=42)
     fee_rate = fields.FloatField(default=0.03)
     target = fields.CharField(max_length=50, default="PoL")
@@ -227,7 +227,7 @@ class LiveExecution(Model):
         "models.Job", related_name="executions", on_delete=fields.CASCADE
     )
     miner_uid = fields.IntField()
-    sn_liquditiy_manager_address = fields.CharField(max_length=42)
+    sn_liquidity_manager_address = fields.CharField(max_length=42)
 
     # Execution details
     strategy_data = fields.JSONField()

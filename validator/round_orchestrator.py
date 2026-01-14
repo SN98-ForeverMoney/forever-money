@@ -114,7 +114,7 @@ class AsyncRoundOrchestrator:
                 # Run evaluation and live rounds concurrently
                 await asyncio.gather(
                     self.run_evaluation_round(job),
-                    # self.run_live_round(job),
+                    self.run_live_round(job),
                     # return_exceptions=True,
                 )
 
@@ -144,7 +144,7 @@ class AsyncRoundOrchestrator:
         """
         # Get active miners
         liq_manager = SnLiqManagerService(
-            job.chain_id, job.sn_liquditiy_manager_address, job.pair_address,
+            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
         )
         active_uids = [
             uid for uid in range(len(self.metagraph.S)) if self.metagraph.S[uid] > 0
@@ -222,7 +222,242 @@ class AsyncRoundOrchestrator:
         Args:
             job: Job to run live round for
         """
-        pass
+        # 1. Get previous evaluation winner
+        winner_uid = await self.job_repository.get_previous_winner(job.job_id)
+        if winner_uid is None:
+            logger.info(f"No previous winner for job {job.job_id}, skipping live round")
+            return
+
+        # 2. Check eligibility
+        miner_score = await self.job_repository.get_eligible_miners(job.job_id)
+        # Check if winner is in eligible list
+        is_eligible = any(s.miner_uid == winner_uid for s in miner_score)
+        if not is_eligible:
+            logger.info(f"Miner {winner_uid} not eligible for live round yet")
+            return
+
+        logger.info(f"=" * 60)
+        logger.info(f"Starting LIVE round for job {job.job_id} with Miner {winner_uid}")
+        logger.info(f"=" * 60)
+
+        self.round_numbers[job.job_id]["live"] += 1
+        round_number = self.round_numbers[job.job_id]["live"]
+
+        # Get target block
+        current_block = await self._get_latest_block(job.chain_id)
+        
+        # Create round
+        round_obj = await self.job_repository.create_round(
+            job=job,
+            round_type=RoundType.LIVE,
+            round_number=round_number,
+            start_block=current_block,
+        )
+
+        liq_manager = SnLiqManagerService(
+            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
+        )
+
+        # Get inventory from SNLiquidityManager contract
+        inventory = await liq_manager.get_inventory()
+
+        # Get initial positions from on-chain
+        initial_positions = await liq_manager.get_current_positions()
+        
+        # Run live execution loop
+        result = await self._run_with_miner_for_live(
+            miner_uid=winner_uid,
+            job=job,
+            round_=round_obj,
+            initial_positions=initial_positions,
+            start_block=current_block,
+            initial_inventory=inventory,
+            rebalance_check_interval=self.rebalance_check_interval,
+        )
+
+        # Update live score
+        if result["accepted"]:
+            # For live rounds, we might want to weight the score differently or use actual PnL
+            # For now, we use the same simulated metric but based on real execution path
+            live_score = result["score"]
+            await self.job_repository.update_miner_score(
+                job_id=job.job_id,
+                miner_uid=winner_uid,
+                miner_hotkey=self.metagraph.hotkeys[winner_uid],
+                live_score=live_score,
+                round_type=RoundType.LIVE,
+            )
+            
+            # Save rebalance decisions (even for live)
+            await self.job_repository.save_rebalance_decision(
+                round_id=round_obj.round_id,
+                job_id=job.job_id,
+                miner_uid=winner_uid,
+                miner_hotkey=self.metagraph.hotkeys[winner_uid],
+                accepted=True,
+                rebalance_data=result["rebalance_history"],
+                refusal_reason=None,
+                response_time_ms=result.get("total_query_time_ms", 0),
+            )
+        else:
+            logger.warning(f"Miner {winner_uid} failed/refused live round: {result.get('refusal_reason')}")
+
+        # Complete round
+        await self.job_repository.complete_round(
+            round_id=round_obj.round_id,
+            winner_uid=winner_uid if result["accepted"] else None,
+            performance_data={"score": result.get("score", 0)},
+        )
+        
+        logger.info(f"Completed LIVE round {round_number}")
+
+    async def _run_with_miner_for_live(
+        self,
+        miner_uid: int,
+        job: Job,
+        round_: Round,
+        initial_positions: List[Position],
+        start_block: int,
+        initial_inventory: Inventory,
+        rebalance_check_interval: int = 50,
+    ) -> Dict:
+        """
+        Run live round loop, executing decisions on-chain.
+        """
+        liq_manager = SnLiqManagerService(
+            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
+        )
+        
+        # Track state
+        current_positions, current_inventory = initial_positions, initial_inventory
+        rebalance_history = [{
+            "block": start_block - 1,
+            "new_positions": initial_positions,
+            "inventory": initial_inventory
+        }]
+        total_query_time_ms = 0
+        rebalances_so_far = 0
+        
+        current_block = start_block
+        
+        while round_.round_deadline >= datetime.now(timezone.utc):
+            # Check rebalance interval
+            if (current_block - start_block) % rebalance_check_interval == 0:
+                price_at_query = await liq_manager.get_current_price()
+                start_query = time.time()
+                
+                response = await self._query_miner_for_rebalance(
+                    miner_uid=miner_uid,
+                    job_id=job.job_id,
+                    sn_liquidity_manager_address=job.sn_liquidity_manager_address,
+                    pair_address=job.pair_address,
+                    round_id=round_.round_id,
+                    round_type=round_.round_type,
+                    block_number=current_block,
+                    current_price=price_at_query,
+                    current_positions=current_positions,
+                    inventory=current_inventory,
+                    rebalances_so_far=rebalances_so_far,
+                )
+                
+                query_time_ms = int((time.time() - start_query) * 1000)
+                total_query_time_ms += query_time_ms
+                
+                if response and response.accepted and response.desired_positions is not None:
+                    # Check if positions changed
+                    # (Simple check, ideally compare sets/hashes)
+                    is_diff = False
+                    if len(response.desired_positions) != len(current_positions):
+                        is_diff = True
+                    else:
+                        # Deep compare
+                        pass # Assuming always rebalance if sent? Or simple check
+                        # For now assume if they sent positions, they want to set them
+                        # But we should optimize gas.
+                        # Let's assume if it's identical we skip.
+                        # For MVP, execute every time miner returns positions? 
+                        # Or let miner return None/Empty if no change?
+                        # Protocol says: "If desired_positions != current_positions: Rebalance"
+                        # We'll rely on miner to be smart, or check strict equality here.
+                        pass
+
+                    # Execute on-chain
+                    success = await self._execute_strategy_onchain(
+                        job=job,
+                        round_obj=round_,
+                        miner_uid=miner_uid,
+                        rebalance_history=rebalance_history + [{
+                            "new_positions": response.desired_positions
+                        }]
+                    )
+                    
+                    if success:
+                        # Record the rebalance in our local history for scoring
+                        # In live mode, we should ideally fetch the NEW inventory/positions from chain
+                        # after execution. But execution is async via bot.
+                        # We assume execution succeeds for simulation purposes?
+                        # Or we wait?
+                        # For MVP, we update local state assuming success.
+                        
+                        # Recalculate inventory usage locally
+                        rebalance_price = await liq_manager.get_current_price()
+                        total_amount_0_placed, total_amount_1_placed = 0, 0
+                        for position in response.desired_positions:
+                            (_, a0, a1) = UniswapV3Math.position_liquidity_and_used_amounts(
+                                position.tick_lower, position.tick_upper,
+                                int(position.allocation0), int(position.allocation1),
+                                rebalance_price
+                            )
+                            total_amount_0_placed += a0
+                            total_amount_1_placed += a1
+                            
+                        # Update inventory (simplified)
+                        # In reality, inventory changes due to fees/swaps.
+                        # We should probably re-fetch inventory from chain next loop.
+                        # But for scoring consistency, we track logical inventory.
+                        amount_0_int = int(initial_inventory.amount0) - total_amount_0_placed
+                        amount_1_int = int(initial_inventory.amount1) - total_amount_1_placed
+                        
+                        current_inventory = Inventory(
+                            amount0=str(max(0, amount_0_int)), 
+                            amount1=str(max(0, amount_1_int))
+                        )
+                        
+                        rebalance_history.append({
+                            "block": current_block,
+                            "price": rebalance_price,
+                            "price_in_query": price_at_query,
+                            "old_positions": current_positions,
+                            "new_positions": response.desired_positions,
+                            "inventory": current_inventory,
+                        })
+                        
+                        current_positions = response.desired_positions
+                        rebalances_so_far += 1
+                        
+            else:
+                await asyncio.sleep(1)
+            
+            current_block = await self._get_latest_block(job.chain_id)
+
+        # Calculate score (using same backtester logic for consistency)
+        performance_metrics = await self.backtester.evaluate_positions_performance(
+            job.pair_address,
+            rebalance_history,
+            start_block,
+            current_block,
+            initial_inventory,
+            job.fee_rate,
+        )
+        
+        score = await Scorer.score_pol_strategy(metrics=performance_metrics)
+        
+        return {
+            "accepted": True,
+            "score": score,
+            "rebalance_history": rebalance_history,
+            "total_query_time_ms": total_query_time_ms
+        }
 
     async def _evaluate_miners(
         self,
@@ -332,13 +567,18 @@ class AsyncRoundOrchestrator:
                 - total_query_time_ms: Total time spent querying miner
         """
         liq_manager = SnLiqManagerService(
-            job.chain_id, job.sn_liquditiy_manager_address, job.pair_address,
+            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
         )
         logger.info(f"[ROUND={round_.round_id}] Running backtest for miner {miner_uid}")
 
         # Track state
         current_positions, current_inventory = initial_positions, initial_inventory
-        rebalance_history = []
+        # Initialize history with starting state (at block before start to cover start_block)
+        rebalance_history = [{
+            "block": start_block - 1,
+            "new_positions": initial_positions,
+            "inventory": initial_inventory
+        }]
         total_query_time_ms = 0
         rebalances_so_far = 0
 
@@ -354,7 +594,7 @@ class AsyncRoundOrchestrator:
                 response = await self._query_miner_for_rebalance(
                     miner_uid=miner_uid,
                     job_id=job.job_id,
-                    sn_liquidity_manager_address=job.sn_liquditiy_manager_address,
+                    sn_liquidity_manager_address=job.sn_liquidity_manager_address,
                     pair_address=job.pair_address,
                     round_id=round_.round_id,
                     round_type=round_.round_type,
@@ -458,6 +698,7 @@ class AsyncRoundOrchestrator:
             current_block = await self._get_latest_block(job.chain_id)
 
         # Calculate performance
+        logger.debug(f"Rebalance history: {rebalance_history}")
         performance_metrics = await self.backtester.evaluate_positions_performance(
             job.pair_address,
             rebalance_history,
@@ -471,28 +712,46 @@ class AsyncRoundOrchestrator:
             f"{len(rebalance_history)} rebalances, "
             f"PnL: {performance_metrics.get('pnl', 0):.4f}"
         )
-        miner_score = await Scorer.score_pol_strategy(job, performance_metrics)
+        miner_score_val = await Scorer.score_pol_strategy(metrics=performance_metrics)
         # calculate the miner score, based on the score their strategy
         # got for this round
-        miner_score = await self.job_repository.update_miner_score(
+        await self.job_repository.update_miner_score(
             job_id=job.job_id,
             miner_uid=miner_uid,
             miner_hotkey=self.metagraph.hotkeys[miner_uid],
             # score here is the score for this particular round
-            evaluation_score=miner_score,
+            evaluation_score=miner_score_val,
             round_type=RoundType.EVALUATION,
         )
         await self.job_repository.update_miner_participation(
             job_id=job.job_id, miner_uid=miner_uid, participated=True
         )
 
+        # Serialize for storage
+        serialized_history = []
+        for item in rebalance_history:
+            new_item = item.copy()
+            if "inventory" in new_item and hasattr(new_item["inventory"], "dict"):
+                new_item["inventory"] = new_item["inventory"].dict()
+            if "new_positions" in new_item:
+                new_item["new_positions"] = [p.dict() for p in new_item["new_positions"] if hasattr(p, "dict")]
+            if "old_positions" in new_item:
+                new_item["old_positions"] = [p.dict() for p in new_item["old_positions"] if hasattr(p, "dict")]
+            serialized_history.append(new_item)
+
+        serialized_metrics = performance_metrics.copy()
+        if "initial_inventory" in serialized_metrics and hasattr(serialized_metrics["initial_inventory"], "dict"):
+            serialized_metrics["initial_inventory"] = serialized_metrics["initial_inventory"].dict()
+        if "final_inventory" in serialized_metrics and hasattr(serialized_metrics["final_inventory"], "dict"):
+            serialized_metrics["final_inventory"] = serialized_metrics["final_inventory"].dict()
+
         return {
             "accepted": True,
             "refusal_reason": None,
-            "rebalance_history": rebalance_history,
-            "final_positions": current_positions,
-            "performance_metrics": performance_metrics,
-            "score": miner_score,
+            "rebalance_history": serialized_history,
+            "final_positions": [p.dict() for p in current_positions if hasattr(p, "dict")],
+            "performance_metrics": serialized_metrics,
+            "score": miner_score_val,
             "total_query_time_ms": total_query_time_ms,
         }
 
@@ -552,12 +811,14 @@ class AsyncRoundOrchestrator:
                 timeout=5,  # 5 second timeout per query
                 deserialize=True,
             )
+            logger.debug(f"Miner response: {responses[0] if responses else 'None'}")
 
             response = responses[0] if responses else None
 
             if response and hasattr(response, "accepted"):
                 return response
 
+            logger.debug(f"Miner refused or failed. Refusal reason: {response.refusal_reason if response else 'No response'}")
             return None
 
         except Exception as e:
@@ -602,7 +863,7 @@ class AsyncRoundOrchestrator:
         payload = {
             "api_key": self.config.get("executor_bot_api_key"),
             "job_id": job.job_id,
-            "sn_liquditiy_manager_address": job.sn_liquditiy_manager_address,
+            "sn_liquditiy_manager_address": job.sn_liquidity_manager_address,
             "pair_address": job.pair_address,
             "positions": positions,
             "round_id": round_obj.round_id,

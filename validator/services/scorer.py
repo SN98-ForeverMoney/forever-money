@@ -11,8 +11,7 @@ class Scorer:
 
     @staticmethod
     async def score_pol_strategy(
-        performance_metrics: Dict[str, Any],
-        initial_inventory: Dict[str, Any],
+        metrics: Dict[str, Any],
         loss_penalty_multiplier: float = 10.0,
         smooth_beta: float = 4.0,
     ) -> float:
@@ -20,24 +19,12 @@ class Scorer:
         Score strategy based on value gain (token1 units) with a smooth
         inventory-loss penalty.
 
-        - Primary signal: value gain at pool price
-        - Inventory loss aggregated via smooth-max (log-sum-exp)
-        - Penalty applies symmetrically:
-            * reduces positive gains
-            * amplifies negative losses
-        - Produces a total ordering (always rankable)
-
         Args:
-            performance_metrics: Dict with:
-                - amount0_holdings
-                - amount1_holdings
-                - fees0
-                - fees1
-                - final_sqrt_price_x96
-            initial_inventory: Dict with:
-                - initial_amount0
-                - initial_amount1
-                - initial_sqrt_price_x96
+            metrics: Dict from Backtester with:
+                - initial_value
+                - final_value
+                - initial_inventory (Inventory object)
+                - final_inventory (Inventory object)
             loss_penalty_multiplier: Strength of inventory loss penalty
             smooth_beta: Controls how close loss aggregation is to max()
                          (lower = more sum-like, higher = more max-like)
@@ -47,62 +34,32 @@ class Scorer:
         """
 
         # -----------------------------
-        # Extract initial inventory
+        # Extract values
         # -----------------------------
-        initial_amount0 = initial_inventory["initial_amount0"]
-        initial_amount1 = initial_inventory["initial_amount1"]
-        initial_sqrt_price_x96 = initial_inventory["initial_sqrt_price_x96"]
+        initial_total_value = metrics["initial_value"]
+        final_total_value = metrics["final_value"]
+        
+        initial_inventory = metrics["initial_inventory"]
+        final_inventory = metrics["final_inventory"]
+
+        if initial_total_value <= 0:
+            return float("-inf")
 
         # -----------------------------
-        # Extract final performance
+        # Extract amounts from Inventory objects
         # -----------------------------
-        final_amount0 = performance_metrics["amount0_holdings"]
-        final_amount1 = performance_metrics["amount1_holdings"]
-        fees0 = performance_metrics["fees0"]
-        fees1 = performance_metrics["fees1"]
-        final_sqrt_price_x96 = performance_metrics["final_sqrt_price_x96"]
+        # Inventory is a Pydantic model or similar object with amount0/amount1 fields (str or int)
+        initial_amount0 = int(initial_inventory.amount0)
+        initial_amount1 = int(initial_inventory.amount1)
+        
+        final_amount0 = int(final_inventory.amount0)
+        final_amount1 = int(final_inventory.amount1)
 
         # -----------------------------
         # Raw inventory loss
         # -----------------------------
         amount0_loss = max(0, initial_amount0 - final_amount0)
         amount1_loss = max(0, initial_amount1 - final_amount1)
-
-        # -----------------------------
-        # Price math (Q192)
-        # -----------------------------
-        initial_price_x192 = initial_sqrt_price_x96 * initial_sqrt_price_x96
-        final_price_x192 = final_sqrt_price_x96 * final_sqrt_price_x96
-
-        # -----------------------------
-        # Initial value (token1 units)
-        # -----------------------------
-        initial_value0_in_token1 = (
-            initial_amount0 * initial_price_x192
-        ) // UniswapV3Math.Q192
-
-        initial_total_value = initial_value0_in_token1 + initial_amount1
-
-        if initial_total_value <= 0:
-            return float("-inf")
-
-        # -----------------------------
-        # Final value (token1 units, incl. fees)
-        # -----------------------------
-        final_value0_in_token1 = (
-            final_amount0 * final_price_x192
-        ) // UniswapV3Math.Q192
-
-        fees_value0_in_token1 = (
-            fees0 * final_price_x192
-        ) // UniswapV3Math.Q192
-
-        final_total_value = (
-            final_value0_in_token1
-            + final_amount1
-            + fees_value0_in_token1
-            + fees1
-        )
 
         # -----------------------------
         # Value gain (primary signal)
@@ -148,4 +105,3 @@ class Scorer:
             score = value_gain / penalty_factor
 
         return score
-

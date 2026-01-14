@@ -56,7 +56,7 @@ class JobRepository:
             Created Round object
         """
         start_time = datetime.now(timezone.utc)
-        round_deadline = start_time + timedelta(minutes=15)  # 15 minutes to
+        round_deadline = start_time + timedelta(seconds=job.round_duration_seconds)
         round_id = f"{job.job_id}_{round_type.value}_{round_number}_{int(start_time.timestamp())}"
 
         round_obj = await Round.create(
@@ -350,7 +350,7 @@ class JobRepository:
             round=round_obj,
             job=job,
             miner_uid=miner_uid,
-            sn_liquditiy_manager_address=job.sn_liquditiy_manager_address,
+            sn_liquidity_manager_address=job.sn_liquidity_manager_address,
             strategy_data=strategy_data,
             tx_hash=tx_hash,
             tx_status="pending" if tx_hash else None,
