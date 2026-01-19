@@ -73,6 +73,55 @@ class JobRepository:
         logger.info(f"Created {round_type.value} round: {round_id}")
         return round_obj
 
+    async def get_or_create_round(
+        self,
+        job: Job,
+        round_type: RoundType,
+        round_number: int,
+        start_block: int,
+    ) -> tuple[Round, bool]:
+        """
+        Get existing round or create a new one. Handles restarts gracefully.
+
+        Args:
+            job: Job to create round for
+            round_type: RoundType.EVALUATION or RoundType.LIVE
+            round_number: Sequential round number
+            start_block: Start block for the round
+
+        Returns:
+            Tuple of (Round object, bool indicating if created)
+        """
+        # Check if round already exists
+        existing_round = await Round.filter(
+            job=job,
+            round_type=round_type,
+            round_number=round_number,
+        ).first()
+
+        if existing_round:
+            logger.info(f"Found existing {round_type.value} round #{round_number} for job {job.job_id}")
+            return existing_round, False
+
+        # Create new round
+        start_time = datetime.now(timezone.utc)
+        round_deadline = start_time + timedelta(seconds=job.round_duration_seconds)
+        round_id = f"{job.job_id}_{round_type.value}_{round_number}_{int(start_time.timestamp())}"
+
+        round_obj = await Round.create(
+            round_id=round_id,
+            job=job,
+            round_type=round_type,
+            round_number=round_number,
+            start_time=start_time,
+            round_deadline=round_deadline,
+            start_block=start_block,
+            status=RoundStatus.ACTIVE,
+        )
+
+        logger.info(f"Created {round_type.value} round: {round_id}")
+        return round_obj, True
+
     async def save_rebalance_decision(
         self,
         round_id: str,

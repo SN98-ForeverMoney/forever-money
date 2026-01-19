@@ -162,13 +162,17 @@ class AsyncRoundOrchestrator:
 
         # Get target block
         current_block = await self._get_latest_block(job.chain_id)
-        # Create round
-        round_obj = await self.job_repository.create_round(
+
+        # Create round (use get_or_create to handle restarts gracefully)
+        round_obj, created = await self.job_repository.get_or_create_round(
             job=job,
             round_type=RoundType.EVALUATION,
             round_number=round_number,
             start_block=current_block,
         )
+        if not created:
+            logger.info(f"Round {round_number} already exists, skipping to next round")
+            return
 
         # Get inventory from SNLiquidityManager contract
         inventory = await liq_manager.get_inventory()
@@ -557,8 +561,10 @@ class AsyncRoundOrchestrator:
         )
 
         miner_axon = self.metagraph.axons[miner_uid]
+        # Convert sqrtPriceX96 to human-readable price for logging
+        readable_price = UniswapV3Math.sqrt_price_x96_to_price(current_price)
         logger.info(f"[QUERY] >>> Sending to miner {miner_uid} @ {miner_axon.ip}:{miner_axon.port}")
-        logger.info(f"[QUERY]     Job: {job_id}, Block: {block_number}, Price: {current_price:.6f}")
+        logger.info(f"[QUERY]     Job: {job_id}, Block: {block_number}, Price: {readable_price:.6f}")
 
         try:
             import time as time_module
