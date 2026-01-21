@@ -863,7 +863,7 @@ class AsyncRoundOrchestrator:
         payload = {
             "api_key": self.config.get("executor_bot_api_key"),
             "job_id": job.job_id,
-            "sn_liquditiy_manager_address": job.sn_liquidity_manager_address,
+            "sn_liquidity_manager_address": job.sn_liquidity_manager_address,
             "pair_address": job.pair_address,
             "positions": positions,
             "round_id": round_obj.round_id,
@@ -877,6 +877,20 @@ class AsyncRoundOrchestrator:
 
             if response.status_code == 200:
                 logger.info(f"Successfully sent strategy to executor bot")
+                
+                # Parse response to get tx details if available
+                response_data = response.json()
+                tx_hash = response_data.get("tx_hash")
+                
+                # Record live execution in DB
+                await self.job_repository.create_live_execution(
+                    round_id=round_obj.round_id,
+                    job_id=job.job_id,
+                    miner_uid=miner_uid,
+                    strategy_data={"positions": positions},
+                    tx_hash=tx_hash
+                )
+                
                 return True
             else:
                 logger.error(f"Executor bot returned {response.status_code}")

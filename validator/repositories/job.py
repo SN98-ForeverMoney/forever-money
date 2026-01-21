@@ -319,6 +319,24 @@ class JobRepository:
 
         return round_obj.winner_uid if round_obj else None
 
+    async def get_top_miners_by_job(self) -> Dict[str, int]:
+        """
+        Get the top miner UID for each active job based on combined score.
+        
+        Returns:
+            Dict mapping job_id -> miner_uid
+        """
+        jobs = await Job.filter(is_active=True)
+        winners = {}
+        
+        for job in jobs:
+            # Get top score
+            top_score = await MinerScore.filter(job=job).order_by("-combined_score").first()
+            if top_score:
+                winners[job.job_id] = top_score.miner_uid
+                
+        return winners
+
     async def create_live_execution(
         self,
         round_id: str,
