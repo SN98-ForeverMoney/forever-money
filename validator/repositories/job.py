@@ -106,6 +106,10 @@ class JobRepository:
         job = await Job.get(job_id=job_id)
         round_obj = await Round.get(round_id=round_id)
 
+        # Serialize rebalance_data to make it JSON-serializable
+        # Convert Inventory and Position objects to dicts
+        serialized_data = self._serialize_rebalance_data(rebalance_data)
+
         # Upsert prediction
         prediction, created = await Prediction.update_or_create(
             round=round_obj,
@@ -117,12 +121,69 @@ class JobRepository:
                 "accepted": accepted,
                 "refusal_reason": refusal_reason,
                 "response_time_ms": response_time_ms,
-                "prediction_data": rebalance_data,
+                "prediction_data": serialized_data,
             },
         )
 
         logger.debug(f"Saved decision for miner {miner_uid} in round {round_id}")
         return prediction_id
+
+    def _serialize_rebalance_data(self, rebalance_data: Optional[List[Dict]]) -> Optional[List[Dict]]:
+        """
+        Serialize rebalance_data to make it JSON-serializable.
+        Converts Inventory and Position objects to dictionaries.
+
+        Args:
+            rebalance_data: List of rebalancing decision dictionaries
+
+        Returns:
+            Serialized list of dictionaries
+        """
+        if rebalance_data is None:
+            return None
+
+        serialized = []
+        for item in rebalance_data:
+            if not isinstance(item, dict):
+                continue
+
+            serialized_item = {}
+            for key, value in item.items():
+                # Handle Inventory objects
+                if hasattr(value, 'amount0') and hasattr(value, 'amount1'):
+                    # It's an Inventory object (Pydantic model)
+                    serialized_item[key] = {
+                        "amount0": str(value.amount0),
+                        "amount1": str(value.amount1)
+                    }
+                # Handle lists of Position objects
+                elif isinstance(value, list) and len(value) > 0:
+                    if hasattr(value[0], 'tick_lower') and hasattr(value[0], 'tick_upper'):
+                        # It's a list of Position objects
+                        serialized_item[key] = [
+                            {
+                                "tick_lower": pos.tick_lower,
+                                "tick_upper": pos.tick_upper,
+                                "allocation0": str(pos.allocation0),
+                                "allocation1": str(pos.allocation1),
+                                **({"confidence": pos.confidence} if hasattr(pos, 'confidence') and pos.confidence is not None else {})
+                            }
+                            for pos in value
+                        ]
+                    else:
+                        # Regular list, keep as is
+                        serialized_item[key] = value
+                # Handle datetime objects
+                elif hasattr(value, 'isoformat'):
+                    # datetime or date object
+                    serialized_item[key] = value.isoformat()
+                else:
+                    # Regular value (str, int, float, dict, etc.)
+                    serialized_item[key] = value
+
+            serialized.append(serialized_item)
+
+        return serialized
 
     async def get_round_predictions(self, round_id: str) -> List[Prediction]:
         """

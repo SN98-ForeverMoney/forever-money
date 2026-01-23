@@ -11,16 +11,46 @@ import requests
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta, timezone
 
+from tortoise import Tortoise
+
 from validator.round_orchestrator import AsyncRoundOrchestrator
-from validator.models.job import Job, Round, RoundType, RoundStatus
+from validator.models.job import Job, Round, LiveExecution, MinerScore, RoundType, RoundStatus
 from validator.repositories.job import JobRepository
+from validator.utils.env import (
+    JOBS_POSTGRES_HOST,
+    JOBS_POSTGRES_PORT,
+    JOBS_POSTGRES_DB,
+    JOBS_POSTGRES_USER,
+    JOBS_POSTGRES_PASSWORD,
+)
 from protocol.models import Inventory, Position
 from protocol.synapses import RebalanceQuery
 
 class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
+    """Test live flow with REAL Postgres DB (not mocks)."""
+    
     async def asyncSetUp(self):
-        # Mocks
-        self.mock_repo = AsyncMock(spec=JobRepository)
+        # Connect to real DB
+        db_url = (
+            f"postgres://{JOBS_POSTGRES_USER}:{JOBS_POSTGRES_PASSWORD}@"
+            f"{JOBS_POSTGRES_HOST}:{JOBS_POSTGRES_PORT}/{JOBS_POSTGRES_DB}"
+        )
+        
+        await Tortoise.init(
+            db_url=db_url,
+            modules={
+                "models": [
+                    "validator.models.job",
+                    "validator.models.pool_events",
+                ],
+            },
+        )
+        await Tortoise.generate_schemas(safe=True)
+        
+        # Use REAL repository (not mock)
+        self.repo = JobRepository()
+        
+        # Mock external dependencies (dendrite, metagraph, web3, liq manager)
         self.mock_dendrite = AsyncMock()
         self.mock_metagraph = MagicMock()
         self.mock_metagraph.hotkeys = ["hotkey0", "hotkey1"]
@@ -33,13 +63,13 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             "executor_bot_api_key": "test_key"
         }
         
-        # Initialize orchestrator
-        # We need to patch database objects and web3 helper
+        # Patch web3 helper
         self.patcher_web3 = patch("validator.round_orchestrator.AsyncWeb3Helper")
         self.mock_web3_cls = self.patcher_web3.start()
         self.mock_web3 = self.mock_web3_cls.make_web3.return_value
         self.mock_web3.web3.eth.block_number = 100
         
+        # Patch liq manager
         self.patcher_liq = patch("validator.round_orchestrator.SnLiqManagerService")
         self.mock_liq_cls = self.patcher_liq.start()
         self.mock_liq = self.mock_liq_cls.return_value
@@ -47,8 +77,9 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
         self.mock_liq.get_current_positions = AsyncMock(return_value=[])
         self.mock_liq.get_current_price = AsyncMock(return_value=1.0)
         
+        # Initialize orchestrator with REAL repo
         self.orchestrator = AsyncRoundOrchestrator(
-            self.mock_repo, self.mock_dendrite, self.mock_metagraph, self.config
+            self.repo, self.mock_dendrite, self.mock_metagraph, self.config
         )
         # Mock backtester
         self.orchestrator.backtester = AsyncMock()
@@ -63,11 +94,24 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.patcher_web3.stop()
         self.patcher_liq.stop()
+        
+        # Clean up test data (optional)
+        CLEANUP_TEST_DATA = False  # Set to True to clean up after tests
+        if CLEANUP_TEST_DATA:
+            try:
+                # Clean up test jobs (and cascading deletes will clean up rounds, executions, etc.)
+                await Job.filter(job_id__startswith="test_job").delete()
+                print("[TestLiveFlow] Cleaned up test data")
+            except Exception as e:
+                print(f"Warning: Failed to clean up test data: {e}")
+        
+        if Tortoise._inited:
+            await Tortoise.close_connections()
 
     async def test_run_live_round_eligible(self):
-        # Setup Job
-        job = Job(
-            job_id="test_job",
+        # Create Job in REAL DB
+        job = await Job.create(
+            job_id=f"test_job_{int(datetime.now(timezone.utc).timestamp())}",
             sn_liquidity_manager_address="0x123",
             pair_address="0x456",
             chain_id=8453,
@@ -76,28 +120,30 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
         )
         
         # Initialize round numbers
-        self.orchestrator.round_numbers["test_job"] = {"evaluation": 0, "live": 0}
+        self.orchestrator.round_numbers[job.job_id] = {"evaluation": 0, "live": 0}
         
-        # Mock Previous Winner
-        self.mock_repo.get_previous_winner.return_value = 0 # Miner 0
+        # Create a previous evaluation round with a winner in REAL DB
+        eval_round = await self.repo.create_round(
+            job=job,
+            round_type=RoundType.EVALUATION,
+            round_number=1,
+            start_block=90
+        )
+        eval_round.winner_uid = 0
+        eval_round.status = RoundStatus.COMPLETED
+        await eval_round.save()
         
-        # Mock Eligibility
-        mock_score = MagicMock()
-        mock_score.miner_uid = 0
-        self.mock_repo.get_eligible_miners.return_value = [mock_score]
-        
-        # Mock Round Creation
-        round_obj = MagicMock(spec=Round)
-        round_obj.round_id = "round_1"
-        round_obj.job = job
-        round_obj.round_type = RoundType.LIVE
-        round_obj.round_number = 1
-        round_obj.start_block = 100
-        round_obj.start_time = datetime.now(timezone.utc)
-        round_obj.round_deadline = datetime.now(timezone.utc) + timedelta(seconds=1)
-        round_obj.status = RoundStatus.ACTIVE
-        
-        self.mock_repo.create_round.return_value = round_obj
+        # Create MinerScore to make miner eligible (7+ days participation)
+        await MinerScore.create(
+            job=job,
+            miner_uid=0,
+            miner_hotkey="hotkey0",
+            evaluation_score=0.8,
+            live_score=0.0,
+            combined_score=0.8,
+            is_eligible_for_live=True,
+            participation_days=10  # > 7 days, so eligible
+        )
         
         # Mock Block Updates (simulation loop)
         # Use a function to return incrementing blocks
@@ -124,42 +170,31 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             mock_response.text = ""
             
             mock_post.return_value = mock_response
-            
+
             # Run Live Round
             await self.orchestrator.run_live_round(job)
             
-            # Assertions
-            self.mock_repo.get_previous_winner.assert_called_with("test_job")
-            self.mock_repo.create_round.assert_called()
+            # Assertions - check REAL DB records
+            # Check round was created in DB
+            live_rounds = await Round.filter(job=job, round_type=RoundType.LIVE).all()
+            self.assertGreater(len(live_rounds), 0, "Live round should be created in DB")
+            live_round = live_rounds[0]
             
-            # Check execution called
+            # Check execution was called
             mock_post.assert_called()
             
-            # Check score updated
-            self.mock_repo.update_miner_score.assert_called()
-            call_kwargs = self.mock_repo.update_miner_score.call_args[1]
-            assert call_kwargs["miner_uid"] == 0
-            assert call_kwargs["round_type"] == RoundType.LIVE
+            # Check LiveExecution was created in REAL DB
+            executions = await LiveExecution.filter(round_id=live_round.id).all()
+            self.assertGreater(len(executions), 0, "LiveExecution should be created in DB")
             
-            # Check LiveExecution was created
-            self.mock_repo.create_live_execution.assert_called()
-            
-            # Check completion
-            self.mock_repo.complete_round.assert_called()
+            # Check round is completed
+            await live_round.refresh_from_db()
+            self.assertEqual(live_round.status, RoundStatus.COMPLETED, "Round should be completed")
 
     async def test_run_live_round_not_eligible(self):
-        job = Job(job_id="test_job", chain_id=1)
-        self.mock_repo.get_previous_winner.return_value = 0
-        self.mock_repo.get_eligible_miners.return_value = [] # No eligible miners
-        
-        await self.orchestrator.run_live_round(job)
-        
-        self.mock_repo.create_round.assert_not_called()
-
-    async def test_execute_strategy_onchain_success(self):
-        """Test successful execution via executor bot."""
-        job = Job(
-            job_id="test_job",
+        # Create Job in REAL DB
+        job = await Job.create(
+            job_id=f"test_job_not_eligible_{int(datetime.now(timezone.utc).timestamp())}",
             sn_liquidity_manager_address="0x123",
             pair_address="0x456",
             chain_id=8453,
@@ -167,17 +202,54 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             fee_rate=3000
         )
         
-        round_obj = MagicMock(spec=Round)
-        round_obj.round_id = "round_1"
-        round_obj.job = job
+        # Create evaluation round with winner, but miner not eligible (< 7 days)
+        eval_round = await self.repo.create_round(
+            job=job,
+            round_type=RoundType.EVALUATION,
+            round_number=1,
+            start_block=90
+        )
+        eval_round.winner_uid = 0
+        await eval_round.save()
+        
+        # Create MinerScore with < 7 days participation (not eligible)
+        await MinerScore.create(
+            job=job,
+            miner_uid=0,
+            miner_hotkey="hotkey0",
+            evaluation_score=0.8,
+            live_score=0.0,
+            combined_score=0.8,
+            participation_days=5  # < 7 days, so NOT eligible
+        )
+        
+        await self.orchestrator.run_live_round(job)
+        
+        # Check no live round was created
+        live_rounds = await Round.filter(job=job, round_type=RoundType.LIVE).all()
+        self.assertEqual(len(live_rounds), 0, "No live round should be created for ineligible miner")
+
+    async def test_execute_strategy_onchain_success(self):
+        """Test successful execution via executor bot."""
+        # Create Job and Round in REAL DB
+        job = await Job.create(
+            job_id=f"test_job_exec_success_{int(datetime.now(timezone.utc).timestamp())}",
+            sn_liquidity_manager_address="0x123",
+            pair_address="0x456",
+            chain_id=8453,
+            round_duration_seconds=60,
+            fee_rate=3000
+        )
+        
+        round_obj = await self.repo.create_round(
+            job=job,
+            round_type=RoundType.LIVE,
+            round_number=1,
+            start_block=100
+        )
         
         position = Position(tick_lower=-100, tick_upper=100, allocation0="500", allocation1="500")
         rebalance_history = [{"new_positions": [position]}]
-        
-        # Mock LiveExecution creation
-        mock_execution = MagicMock()
-        mock_execution.execution_id = "exec_123"
-        self.mock_repo.create_live_execution.return_value = mock_execution
         
         with patch("requests.post") as mock_post:
             # Mock successful response
@@ -200,20 +272,21 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             assert result["success"] is True
             assert result["tx_hash"] == "0xabc123"
             assert result["error"] is None
-            assert result["execution_id"] == "exec_123"
+            assert result["execution_id"] is not None
             
-            # Verify LiveExecution was created
-            self.mock_repo.create_live_execution.assert_called_once()
-            call_kwargs = self.mock_repo.create_live_execution.call_args[1]
-            assert call_kwargs["round_id"] == "round_1"
-            assert call_kwargs["job_id"] == "test_job"
-            assert call_kwargs["miner_uid"] == 0
-            assert call_kwargs["tx_hash"] == "0xabc123"
+            # Verify LiveExecution was created in REAL DB
+            execution = await LiveExecution.get(execution_id=result["execution_id"])
+            self.assertEqual(execution.round_id, round_obj.id)
+            self.assertEqual(execution.job_id, job.id)
+            self.assertEqual(execution.miner_uid, 0)
+            self.assertEqual(execution.tx_hash, "0xabc123")
+            self.assertEqual(execution.tx_status, "pending")
 
     async def test_execute_strategy_onchain_failure(self):
         """Test failed execution via executor bot."""
-        job = Job(
-            job_id="test_job",
+        # Create Job and Round in REAL DB
+        job = await Job.create(
+            job_id=f"test_job_exec_failure_{int(datetime.now(timezone.utc).timestamp())}",
             sn_liquidity_manager_address="0x123",
             pair_address="0x456",
             chain_id=8453,
@@ -221,21 +294,17 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             fee_rate=3000
         )
         
-        round_obj = MagicMock(spec=Round)
-        round_obj.round_id = "round_1"
-        round_obj.job = job
+        round_obj = await self.repo.create_round(
+            job=job,
+            round_type=RoundType.LIVE,
+            round_number=1,
+            start_block=100
+        )
         
         position = Position(tick_lower=-100, tick_upper=100, allocation0="500", allocation1="500")
         rebalance_history = [{"new_positions": [position]}]
         
-        # Mock LiveExecution creation
-        mock_execution = MagicMock()
-        mock_execution.execution_id = "exec_456"
-        mock_execution.tx_status = None
-        mock_execution.save = AsyncMock()
-        self.mock_repo.create_live_execution.return_value = mock_execution
-        
-        with patch("validator.round_orchestrator.requests.post") as mock_post:
+        with patch("requests.post") as mock_post:
             # Mock failed response
             mock_response = MagicMock()
             mock_response.status_code = 500
@@ -253,18 +322,23 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             assert result["success"] is False
             assert result["tx_hash"] is None
             assert "Executor bot returned status 500" in result["error"]
-            assert result["execution_id"] == "exec_456"  # Should still create execution record
+            assert result["execution_id"] is not None  # Should still create execution record
             
-            # Verify LiveExecution was created with failed status
-            self.mock_repo.create_live_execution.assert_called_once()
-            # Verify execution status was updated to failed
-            assert mock_execution.tx_status == "failed"
-            mock_execution.save.assert_called_once()
+            # Verify LiveExecution was created in REAL DB with failed status
+            execution = await LiveExecution.get(execution_id=result["execution_id"])
+            self.assertEqual(execution.round_id, round_obj.id)
+            self.assertEqual(execution.job_id, job.id)
+            self.assertEqual(execution.miner_uid, 0)
+            self.assertIsNone(execution.tx_hash)
+            self.assertEqual(execution.tx_status, "failed")
+            self.assertIsNotNone(execution.actual_performance)
+            self.assertIn("error", execution.actual_performance)
 
     async def test_execute_strategy_onchain_network_error(self):
         """Test network error during execution."""
-        job = Job(
-            job_id="test_job",
+        # Create Job and Round in REAL DB
+        job = await Job.create(
+            job_id=f"test_job_exec_network_error_{int(datetime.now(timezone.utc).timestamp())}",
             sn_liquidity_manager_address="0x123",
             pair_address="0x456",
             chain_id=8453,
@@ -272,19 +346,15 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             fee_rate=3000
         )
         
-        round_obj = MagicMock(spec=Round)
-        round_obj.round_id = "round_1"
-        round_obj.job = job
+        round_obj = await self.repo.create_round(
+            job=job,
+            round_type=RoundType.LIVE,
+            round_number=1,
+            start_block=100
+        )
         
         position = Position(tick_lower=-100, tick_upper=100, allocation0="500", allocation1="500")
         rebalance_history = [{"new_positions": [position]}]
-        
-        # Mock LiveExecution creation
-        mock_execution = MagicMock()
-        mock_execution.execution_id = "exec_789"
-        mock_execution.tx_status = None
-        mock_execution.save = AsyncMock()
-        self.mock_repo.create_live_execution.return_value = mock_execution
         
         with patch("requests.post") as mock_post:
             # Mock network error
@@ -300,10 +370,17 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             assert result["success"] is False
             assert result["tx_hash"] is None
             assert "HTTP client error" in result["error"]
-            assert result["execution_id"] == "exec_789"  # Should still create execution record
-            # Verify execution status was updated to failed
-            assert mock_execution.tx_status == "failed"
-            mock_execution.save.assert_called_once()
+            assert result["execution_id"] is not None  # Should still create execution record
+            
+            # Verify LiveExecution was created in REAL DB with failed status
+            execution = await LiveExecution.get(execution_id=result["execution_id"])
+            self.assertEqual(execution.round_id, round_obj.id)
+            self.assertEqual(execution.job_id, job.id)
+            self.assertEqual(execution.miner_uid, 0)
+            self.assertIsNone(execution.tx_hash)
+            self.assertEqual(execution.tx_status, "failed")
+            self.assertIsNotNone(execution.actual_performance)
+            self.assertIn("error", execution.actual_performance)
 
 if __name__ == "__main__":
     unittest.main()

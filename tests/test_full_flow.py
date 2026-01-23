@@ -106,7 +106,7 @@ async def test_full_flow():
             db_url="sqlite://:memory:",
             modules={"models": ["validator.models.job"]}
         )
-        await Tortoise.generate_schemas()
+        await Tortoise.generate_schemas(safe=True)
         
         job_repo = JobRepository()
         

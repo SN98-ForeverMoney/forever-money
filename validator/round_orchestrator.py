@@ -951,13 +951,6 @@ class AsyncRoundOrchestrator:
                 "error": error_msg
             }
 
-        logger.info(
-            "Attempting on-chain execution: round_id=%s job_id=%s miner_uid=%s",
-            round_obj.round_id,
-            job.job_id,
-            miner_uid,
-        )
-
         execution_id = None
         tx_hash = None
         error = None
@@ -1017,10 +1010,8 @@ class AsyncRoundOrchestrator:
                         )
                 except Exception as db_error:
                     logger.error(
-                        "Failed to create live execution record: %s. "
-                        "Check DB connection, table live_executions, and logs.",
-                        db_error,
-                        exc_info=True,
+                        f"Failed to create live execution record: {db_error}",
+                        exc_info=True
                     )
                     execution_id = None
                     error = f"Database error: {str(db_error)}"
@@ -1061,10 +1052,8 @@ class AsyncRoundOrchestrator:
                     await execution.save()
                 except Exception as db_error:
                     logger.error(
-                        "Failed to create failed execution record: %s. "
-                        "Check DB connection, table live_executions, and logs.",
-                        db_error,
-                        exc_info=True,
+                        f"Failed to create failed execution record: {db_error}",
+                        exc_info=True
                     )
                     execution_id = None
                 
@@ -1098,10 +1087,8 @@ class AsyncRoundOrchestrator:
                 await execution.save()
             except Exception as db_error:
                 logger.error(
-                    "Failed to create failed execution record: %s. "
-                    "Check DB connection, table live_executions, and logs.",
-                    db_error,
-                    exc_info=True,
+                    f"Failed to create failed execution record: {db_error}",
+                    exc_info=True
                 )
                 execution_id = None
             
