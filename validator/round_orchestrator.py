@@ -277,18 +277,40 @@ class AsyncRoundOrchestrator:
 
         # Update live score
         if result["accepted"]:
-            # For live rounds, we might want to weight the score differently or use actual PnL
-            # For now, we use the same simulated metric but based on real execution path
-            live_score = result["score"]
-            await self.job_repository.update_miner_score(
-                job_id=job.job_id,
-                miner_uid=winner_uid,
-                miner_hotkey=self.metagraph.hotkeys[winner_uid],
-                live_score=live_score,
-                round_type=RoundType.LIVE,
-            )
+            execution_failures = result.get("execution_failures", 0)
+            execution_results = result.get("execution_results", [])
+            total_executions = len(execution_results)
             
-            # Save rebalance decisions (even for live)
+            # Check if all executions failed - if so, revert score update
+            if total_executions > 0 and execution_failures == total_executions:
+                logger.error(
+                    f"All {total_executions} executions failed for miner {winner_uid} "
+                    f"in live round {round_number}. Not updating score."
+                )
+                # Don't update score if all executions failed
+                # The round is still marked as completed but with no score update
+            else:
+                # For live rounds, we might want to weight the score differently or use actual PnL
+                # For now, we use the same simulated metric but based on real execution path
+                live_score = result["score"]
+                
+                # If some executions failed, log a warning but still update score
+                if execution_failures > 0:
+                    logger.warning(
+                        f"Miner {winner_uid} had {execution_failures}/{total_executions} "
+                        f"execution failures in live round {round_number}. "
+                        f"Score may be inaccurate."
+                    )
+                
+                await self.job_repository.update_miner_score(
+                    job_id=job.job_id,
+                    miner_uid=winner_uid,
+                    miner_hotkey=self.metagraph.hotkeys[winner_uid],
+                    live_score=live_score,
+                    round_type=RoundType.LIVE,
+                )
+            
+            # Save rebalance decisions (even for live, even if executions failed)
             await self.job_repository.save_rebalance_decision(
                 round_id=round_obj.round_id,
                 job_id=job.job_id,
@@ -323,6 +345,15 @@ class AsyncRoundOrchestrator:
     ) -> Dict:
         """
         Run live round loop, executing decisions on-chain.
+        
+        Returns:
+            Dict with:
+                - accepted: bool
+                - score: float
+                - rebalance_history: List[Dict]
+                - total_query_time_ms: int
+                - execution_failures: int - Number of failed executions
+                - execution_results: List[Dict] - Execution results
         """
         liq_manager = SnLiqManagerService(
             job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
@@ -337,6 +368,8 @@ class AsyncRoundOrchestrator:
         }]
         total_query_time_ms = 0
         rebalances_so_far = 0
+        execution_failures = 0
+        execution_results = []
         
         current_block = start_block
         
@@ -382,7 +415,7 @@ class AsyncRoundOrchestrator:
                         pass
 
                     # Execute on-chain
-                    success = await self._execute_strategy_onchain(
+                    execution_result = await self._execute_strategy_onchain(
                         job=job,
                         round_obj=round_,
                         miner_uid=miner_uid,
@@ -391,7 +424,16 @@ class AsyncRoundOrchestrator:
                         }]
                     )
                     
-                    if success:
+                    # Track execution result
+                    execution_results.append({
+                        "block": current_block,
+                        "success": execution_result["success"],
+                        "execution_id": execution_result.get("execution_id"),
+                        "tx_hash": execution_result.get("tx_hash"),
+                        "error": execution_result.get("error")
+                    })
+                    
+                    if execution_result["success"]:
                         # Record the rebalance in our local history for scoring
                         # In live mode, we should ideally fetch the NEW inventory/positions from chain
                         # after execution. But execution is async via bot.
@@ -430,10 +472,21 @@ class AsyncRoundOrchestrator:
                             "old_positions": current_positions,
                             "new_positions": response.desired_positions,
                             "inventory": current_inventory,
+                            "execution_id": execution_result.get("execution_id"),
+                            "tx_hash": execution_result.get("tx_hash"),
                         })
                         
                         current_positions = response.desired_positions
                         rebalances_so_far += 1
+                    else:
+                        # Execution failed - log and continue
+                        execution_failures += 1
+                        logger.error(
+                            f"Failed to execute strategy on-chain for miner {miner_uid} "
+                            f"at block {current_block}: {execution_result.get('error')}"
+                        )
+                        # Don't update positions if execution failed
+                        # The rebalance will be retried on next interval if miner still wants it
                         
             else:
                 await asyncio.sleep(1)
@@ -456,7 +509,9 @@ class AsyncRoundOrchestrator:
             "accepted": True,
             "score": score,
             "rebalance_history": rebalance_history,
-            "total_query_time_ms": total_query_time_ms
+            "total_query_time_ms": total_query_time_ms,
+            "execution_failures": execution_failures,
+            "execution_results": execution_results
         }
 
     async def _evaluate_miners(
@@ -827,7 +882,7 @@ class AsyncRoundOrchestrator:
 
     async def _execute_strategy_onchain(
         self, job: Job, round_obj: Round, miner_uid: int, rebalance_history: List[Dict]
-    ) -> bool:
+    ) -> Dict[str, any]:
         """
         Execute strategy on-chain via executor bot.
 
@@ -838,28 +893,43 @@ class AsyncRoundOrchestrator:
             rebalance_history: List of rebalancing decisions
 
         Returns:
-            True if execution initiated successfully
+            Dict with:
+                - success: bool - Whether execution was initiated successfully
+                - execution_id: Optional[str] - LiveExecution ID if created
+                - tx_hash: Optional[str] - Transaction hash if available
+                - error: Optional[str] - Error message if failed
         """
         executor_url = self.config.get("executor_bot_url")
         if not executor_url:
             logger.warning("No executor bot URL configured")
-            return False
+            return {
+                "success": False,
+                "execution_id": None,
+                "tx_hash": None,
+                "error": "No executor bot URL configured"
+            }
 
         # Get final positions from last rebalance
         final_positions = (
             rebalance_history[-1]["new_positions"] if rebalance_history else []
         )
 
-        positions = [
-            {
-                "tick_lower": pos.tick_lower,
-                "tick_upper": pos.tick_upper,
-                "allocation0": pos.allocation0,
-                "allocation1": pos.allocation1,
-            }
-            for pos in final_positions
-        ]
+        # Serialize positions - handle both Position objects and dicts
+        positions = []
+        for pos in final_positions:
+            if hasattr(pos, 'tick_lower'):
+                # Position object
+                positions.append({
+                    "tick_lower": pos.tick_lower,
+                    "tick_upper": pos.tick_upper,
+                    "allocation0": pos.allocation0,
+                    "allocation1": pos.allocation1,
+                })
+            elif isinstance(pos, dict):
+                # Already a dict
+                positions.append(pos)
 
+        # Verify payload structure matches Executor Bot expectations
         payload = {
             "api_key": self.config.get("executor_bot_api_key"),
             "job_id": job.job_id,
@@ -870,35 +940,210 @@ class AsyncRoundOrchestrator:
             "miner_uid": miner_uid,
         }
 
-        try:
-            response = requests.post(
-                f"{executor_url}/execute_strategy", json=payload, timeout=30
-            )
+        # Validate required fields
+        if not payload.get("api_key"):
+            error_msg = "Missing executor_bot_api_key in config"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "execution_id": None,
+                "tx_hash": None,
+                "error": error_msg
+            }
 
+        logger.info(
+            "Attempting on-chain execution: round_id=%s job_id=%s miner_uid=%s",
+            round_obj.round_id,
+            job.job_id,
+            miner_uid,
+        )
+
+        execution_id = None
+        tx_hash = None
+        error = None
+
+        try:
+            # Use requests with asyncio.to_thread to run synchronously in thread pool
+            def make_request():
+                return requests.post(
+                    f"{executor_url}/execute_strategy",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=30
+                )
+            
+            response = await asyncio.to_thread(make_request)
+            
             if response.status_code == 200:
-                logger.info(f"Successfully sent strategy to executor bot")
+                logger.info(
+                    f"Successfully sent strategy to executor bot for round {round_obj.round_id}, "
+                    f"miner {miner_uid}"
+                )
                 
                 # Parse response to get tx details if available
-                response_data = response.json()
-                tx_hash = response_data.get("tx_hash")
+                try:
+                    response_data = response.json()
+                    tx_hash = response_data.get("tx_hash")
+                    error_msg = response_data.get("error")
+                    
+                    if error_msg:
+                        logger.warning(
+                            f"Executor bot returned error in response: {error_msg}"
+                        )
+                        error = error_msg
+                except Exception as json_error:
+                    logger.warning(
+                        f"Failed to parse executor bot response as JSON: {json_error}"
+                    )
                 
-                # Record live execution in DB
-                await self.job_repository.create_live_execution(
+                # Record live execution in DB (even if there's an error message)
+                try:
+                    execution = await self.job_repository.create_live_execution(
+                        round_id=round_obj.round_id,
+                        job_id=job.job_id,
+                        miner_uid=miner_uid,
+                        strategy_data={"positions": positions},
+                        tx_hash=tx_hash
+                    )
+                    execution_id = execution.execution_id
+                    
+                    # Update execution status based on response
+                    if error:
+                        execution.tx_status = "failed"
+                        execution.actual_performance = {"error": error}
+                        await execution.save()
+                        logger.warning(
+                            f"Live execution {execution_id} marked as failed: {error}"
+                        )
+                except Exception as db_error:
+                    logger.error(
+                        "Failed to create live execution record: %s. "
+                        "Check DB connection, table live_executions, and logs.",
+                        db_error,
+                        exc_info=True,
+                    )
+                    execution_id = None
+                    error = f"Database error: {str(db_error)}"
+                
+                return {
+                    "success": error is None,  # Success only if no error
+                    "execution_id": execution_id,
+                    "tx_hash": tx_hash,
+                    "error": error
+                }
+            else:
+                # Non-200 status code
+                error_msg = f"Executor bot returned status {response.status_code}"
+                try:
+                    error_body = response.text
+                    if error_body:
+                        error_msg += f": {error_body}"
+                except Exception:
+                    pass
+                
+                logger.error(
+                    f"Executor bot execution failed: {error_msg} "
+                    f"(round={round_obj.round_id}, miner={miner_uid})"
+                )
+                
+                # Still create execution record with failed status
+                try:
+                    execution = await self.job_repository.create_live_execution(
+                        round_id=round_obj.round_id,
+                        job_id=job.job_id,
+                        miner_uid=miner_uid,
+                        strategy_data={"positions": positions},
+                        tx_hash=None
+                    )
+                    execution_id = execution.execution_id
+                    execution.tx_status = "failed"
+                    execution.actual_performance = {"error": error_msg}
+                    await execution.save()
+                except Exception as db_error:
+                    logger.error(
+                        "Failed to create failed execution record: %s. "
+                        "Check DB connection, table live_executions, and logs.",
+                        db_error,
+                        exc_info=True,
+                    )
+                    execution_id = None
+                
+                return {
+                    "success": False,
+                    "execution_id": execution_id,
+                    "tx_hash": None,
+                    "error": error_msg
+                }
+
+        except requests.RequestException as e:
+            error_msg = f"HTTP client error: {str(e)}"
+            logger.error(
+                f"Failed to send strategy to executor bot: {error_msg} "
+                f"(round={round_obj.round_id}, miner={miner_uid})",
+                exc_info=True
+            )
+            
+            # Create execution record with failed status
+            try:
+                execution = await self.job_repository.create_live_execution(
                     round_id=round_obj.round_id,
                     job_id=job.job_id,
                     miner_uid=miner_uid,
                     strategy_data={"positions": positions},
-                    tx_hash=tx_hash
+                    tx_hash=None
                 )
-                
-                return True
-            else:
-                logger.error(f"Executor bot returned {response.status_code}")
-                return False
-
+                execution_id = execution.execution_id
+                execution.tx_status = "failed"
+                execution.actual_performance = {"error": error_msg}
+                await execution.save()
+            except Exception as db_error:
+                logger.error(
+                    "Failed to create failed execution record: %s. "
+                    "Check DB connection, table live_executions, and logs.",
+                    db_error,
+                    exc_info=True,
+                )
+                execution_id = None
+            
+            return {
+                "success": False,
+                "execution_id": execution_id,
+                "tx_hash": None,
+                "error": error_msg
+            }
         except Exception as e:
-            logger.error(f"Failed to send strategy to executor bot: {e}")
-            return False
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(
+                f"Unexpected error sending strategy to executor bot: {error_msg} "
+                f"(round={round_obj.round_id}, miner={miner_uid})",
+                exc_info=True
+            )
+            
+            # Create execution record with failed status
+            try:
+                execution = await self.job_repository.create_live_execution(
+                    round_id=round_obj.round_id,
+                    job_id=job.job_id,
+                    miner_uid=miner_uid,
+                    strategy_data={"positions": positions},
+                    tx_hash=None
+                )
+                execution_id = execution.execution_id
+                execution.tx_status = "failed"
+                execution.actual_performance = {"error": error_msg}
+                await execution.save()
+            except Exception as db_error:
+                logger.error(
+                    f"Failed to create failed execution record: {db_error}",
+                    exc_info=True
+                )
+            
+            return {
+                "success": False,
+                "execution_id": execution_id,
+                "tx_hash": None,
+                "error": error_msg
+            }
 
     def _select_winner(self, scores: Dict[int, Dict]) -> Optional[Dict]:
         """Select winner from scores."""
