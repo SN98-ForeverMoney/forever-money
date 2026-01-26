@@ -514,7 +514,7 @@ async def init_pool_events_db(db_url: str):
 
     await Tortoise.init(
         db_url=db_url,
-        modules={"pool_events": ["validator.pool_events_models"]},
+        modules={"pool_events": ["validator.models.pool_events"]},
     )
     logger.info("Pool events database initialized")
 
