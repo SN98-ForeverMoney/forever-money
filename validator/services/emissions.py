@@ -8,7 +8,8 @@ from validator.services.price import PriceService
 from validator.services.revenue import RevenueService
 from validator.models.job import Job, MinerScore
 from validator.repositories.job import JobRepository
-from validator.utils.env import NETUID
+from validator.utils.env import NETUID, PROFIT_RATIO
+
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +23,18 @@ class EmissionsService:
         subtensor: bt.Subtensor,
         job_repository: JobRepository,
         revenue_service: Optional[RevenueService] = None,
+        profit_ratio: Optional[float] = None,
     ):
         self.metagraph = metagraph
         self.subtensor = subtensor
         self.job_repository = job_repository
         self.revenue_service = revenue_service
+        self.profit_ratio = (
+            profit_ratio
+            if profit_ratio is not None
+            else PROFIT_RATIO
+        )
+        self.profit_ratio = max(0.0, min(1.0, float(self.profit_ratio)))
 
     async def get_vault_revenue_usd(self) -> float:
         """
@@ -51,77 +59,85 @@ class EmissionsService:
     async def calculate_emissions_split(self) -> Tuple[float, float]:
         """
         Calculate the split between Miner Burn (UID 0) and Active Miners.
-        
-        Logic:
+
+        Incentive-aligned logic: higher revenue → more to miners, less burn.
+
         - Unprofitable (revenue <= 0): 100% burn (all to UID 0)
-        - Profitable (revenue > 0): Partial burn
-          - Burn Value = Vault Revenue (USD) / TWAP Alpha Price
-          - Miner Emissions = Total Subnet Emissions - Burn Value
-          - Assign weight to UID 0 proportional to Burn Value
-        
+        - Profitable (revenue > 0):
+          - Revenue in Alpha = Vault Revenue (USD) / TWAP Alpha Price
+          - Miner Ratio = min(profit_ratio, Revenue in Alpha / Total Subnet Emissions)
+            → miners get a share that increases with revenue, capped at profit_ratio
+            (profit_ratio is configurable via __init__ or PROFIT_RATIO env, default 1.0)
+          - Burn Ratio = 1 - Miner Ratio
+          - Miner Emissions = Total × Miner Ratio; Burn = Total × Burn Ratio
+
         Returns:
             (burn_ratio, miner_ratio)
             e.g., (0.1, 0.9) means 10% burn, 90% to miners.
         """
-
         revenue_usd = await self.get_vault_revenue_usd()
-        alpha_price_usd = await PriceService.get_alpha_price_usd(self.subtensor, NETUID)
-        print(f"Alpha price usd: {alpha_price_usd}")
-        
-        # Get total subnet emissions per epoch (in Alpha units)
-        # metagraph.emission is a vector of emissions for the *last* epoch in RAO
-        # 1 Tao = 1e9 Rao, and Alpha ≈ Tao for subnet tokens
+        alpha_price_usd = await PriceService.get_alpha_price_usd(
+            self.subtensor, NETUID
+        )
+
+        # Total subnet emissions per epoch (in Alpha)
         total_emission_rao = sum(self.metagraph.emission)
-        print(f"Total emission rao: {total_emission_rao}")
         total_emission_alpha = float(total_emission_rao) / 1e9
 
         if total_emission_alpha <= 0:
             logger.warning("Total emissions are 0, defaulting to 100% burn")
             return 1.0, 0.0
 
-        # Unprofitable: 100% Miner Burn (All weights to UID 0)
         if revenue_usd <= 0:
             logger.info(
-                f"Unprofitable (revenue=${revenue_usd:.2f}): 100% burn to UID 0"
+                "Unprofitable (revenue=%.2f): 100%% burn to UID 0",
+                revenue_usd,
             )
             return 1.0, 0.0
 
-        # Profitable: Partial Burn
         if alpha_price_usd <= 0:
-            logger.warning("Alpha price is 0 or invalid, defaulting to 0% burn")
+            logger.warning(
+                "Alpha price is 0 or invalid, defaulting to 0%% burn"
+            )
             return 0.0, 1.0
 
-        # Calculate Burn Value = Vault Revenue (USD) / TWAP Alpha Price
-        burn_value_alpha = revenue_usd / alpha_price_usd
-        
-        # Miner Emissions = Total Subnet Emissions - Burn Value
-        miner_emissions_alpha = max(0.0, total_emission_alpha - burn_value_alpha)
-        
-        # Calculate burn ratio
-        burn_ratio = burn_value_alpha / total_emission_alpha
-        
-        # Cap at 100%
-        burn_ratio = min(max(burn_ratio, 0.0), 1.0)
-        miner_ratio = 1.0 - burn_ratio
-        
-        logger.info(
-            f"Emissions Split (Profitable): Revenue=${revenue_usd:.2f}, "
-            f"AlphaPrice=${alpha_price_usd:.2f}, "
-            f"BurnValue={burn_value_alpha:.4f} Alpha, "
-            f"TotalEmission={total_emission_alpha:.4f} Alpha, "
-            f"MinerEmissions={miner_emissions_alpha:.4f} Alpha, "
-            f"BurnRatio={burn_ratio:.4f}, MinerRatio={miner_ratio:.4f}"
+        revenue_alpha = revenue_usd / alpha_price_usd
+
+        # Miner share grows with revenue, capped at profit_ratio. Rest is burn.
+        miner_ratio = min(
+            self.profit_ratio,
+            revenue_alpha / total_emission_alpha,
         )
-        
+        miner_ratio = max(0.0, miner_ratio)
+        burn_ratio = 1.0 - miner_ratio
+
+        miner_emissions_alpha = total_emission_alpha * miner_ratio
+        burn_alpha = total_emission_alpha * burn_ratio
+
+        logger.info(
+            "Emissions split (revenue↑→miners↑): profit_ratio=%.2f "
+            "revenue_usd=%.2f alpha_price=%.4f revenue_alpha=%.4f total=%.4f "
+            "miner_ratio=%.4f burn_ratio=%.4f miner_alpha=%.4f burn_alpha=%.4f",
+            self.profit_ratio,
+            revenue_usd,
+            alpha_price_usd,
+            revenue_alpha,
+            total_emission_alpha,
+            miner_ratio,
+            burn_ratio,
+            miner_emissions_alpha,
+            burn_alpha,
+        )
         return burn_ratio, miner_ratio
 
     async def calculate_weights(self, miner_scores: Dict[int, float]) -> Tuple[List[int], List[float]]:
         """
         Calculate weights for all uids with Taoflow optimization.
-        
+
         Logic:
         - Unprofitable: 100% to UID 0 (burn)
-        - Profitable: Partial burn to UID 0, rest distributed to top miners
+        - Profitable: miner_ratio grows with revenue (miners get more when
+          revenue is higher); burn_ratio = 1 - miner_ratio. Rest to top miners.
         
         Args:
             miner_scores: Dict mapping miner_uid -> score (higher is better)

@@ -80,6 +80,11 @@ REBALANCE_CHECK_INTERVAL = get_env_variable(
     type_=int,
     default=100,
 )
+PROFIT_RATIO = get_env_variable(
+    name="PROFIT_RATIO",
+    type_=float,
+    default=1.0,
+)
 
 # Database configuration
 JOBS_POSTGRES_HOST = get_env_variable(
