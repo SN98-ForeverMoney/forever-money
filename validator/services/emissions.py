@@ -75,9 +75,6 @@ class EmissionsService:
         print(f"Total emission rao: {total_emission_rao}")
         total_emission_alpha = float(total_emission_rao) / 1e9
 
-        total_emission_alpha = 10000
-        revenue_usd = 2000
-        
         if total_emission_alpha <= 0:
             logger.warning("Total emissions are 0, defaulting to 100% burn")
             return 1.0, 0.0
