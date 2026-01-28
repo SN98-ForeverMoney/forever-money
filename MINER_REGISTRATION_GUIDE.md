@@ -1,6 +1,6 @@
 # Miner Registration Guide - Dev Network
 
-This guide will help you get funds and register as a miner on the SN98 ForeverMoney subnet running at **198.7.122.37**.
+This guide will help you get funds and register as a miner on the SN98 ForeverMoney subnet running at **3.142.51.152**.
 
 > **⚠️ IMPORTANT NOTICE**
 > This is a development/test network and **may be restarted at any time**.
@@ -9,6 +9,18 @@ This guide will help you get funds and register as a miner on the SN98 ForeverMo
 
 - `btcli` (Bittensor CLI) installed
 - Python 3.8+ with required dependencies
+
+
+## 💡 Pro Tip: Set Default Network
+
+To avoid typing `--network ws://3.21.33.121:9944` for every command, you can set it as your default:
+
+```bash
+btcli config set --network ws://3.21.33.121:9944
+```
+
+Now you can run commands like `btcli wallet list` without the network flag!
+
 
 ## Step 1: Create Your Miner Wallet
 
@@ -46,8 +58,7 @@ btcli wallet create --uri alice
 
 # Verify Alice's balance
 btcli wallet balance \
-  --wallet.name alice \
-  --network ws://198.7.122.37:9945
+  --wallet.name alice
 ```
 
 Now transfer TAO from Alice to your miner wallet:
@@ -60,8 +71,7 @@ btcli wallet list
 btcli wallet transfer \
   --wallet.name alice \
   --destination <YOUR_MINER_COLDKEY_ADDRESS> \
-  --amount 1000 \
-  --network ws://198.7.122.37:9945
+  --amount 1000
 ```
 
 Replace `<YOUR_MINER_COLDKEY_ADDRESS>` with your coldkey address from `btcli wallet list`.
@@ -76,8 +86,7 @@ Once you have TAO, verify your balance:
 
 ```bash
 btcli wallet balance \
-  --wallet.name my_miner \
-  --network ws://198.7.122.37:9945
+  --wallet.name my_miner
 ```
 
 ## Step 3: Verify Subnet Information
@@ -89,7 +98,7 @@ The SN98 ForeverMoney subnet is configured as:
 You can verify this by listing all subnets:
 
 ```bash
-btcli subnet list --network ws://198.7.122.37:9945
+btcli subnet list
 ```
 
 ## Step 4: Register Your Miner
@@ -100,8 +109,7 @@ Register your miner hotkey to the subnet:
 btcli subnet register \
   --netuid 2 \
   --wallet.name my_miner \
-  --hotkey default \
-  --network ws://198.7.122.37:9945
+  --hotkey default
 ```
 
 You'll be prompted to:
@@ -116,8 +124,7 @@ Check that your miner is registered:
 
 ```bash
 btcli subnet show \
-  --netuid 2 \
-  --network ws://198.7.122.37:9945
+  --netuid 2
 ```
 
 You should see your hotkey listed with a UID (User ID).
@@ -160,15 +167,11 @@ Start your miner using Bittensor axon:
 python -m miner.miner \
   --wallet.name my_miner \
   --wallet.hotkey default \
-  --subtensor.network finney \
-  --subtensor.chain_endpoint ws://198.7.122.37:9944 \
   --netuid 2 \
   --axon.port 8091
 ```
 
 **Important flags:**
-- `--subtensor.network finney` - Use finney network type
-- `--subtensor.chain_endpoint ws://198.7.122.37:9944` - Connect to dev network
 - `--netuid 2` - SN98 ForeverMoney subnet ID
 - `--axon.port 8091` - Port for receiving validator queries (must be publicly accessible)
 

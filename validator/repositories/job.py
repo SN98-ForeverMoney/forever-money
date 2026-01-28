@@ -155,6 +155,10 @@ class JobRepository:
         job = await Job.get(job_id=job_id)
         round_obj = await Round.get(round_id=round_id)
 
+        # Serialize rebalance_data to make it JSON-serializable
+        # Convert Inventory and Position objects to dicts
+        serialized_data = self._serialize_rebalance_data(rebalance_data)
+
         # Upsert prediction
         prediction, created = await Prediction.update_or_create(
             round=round_obj,
@@ -166,12 +170,69 @@ class JobRepository:
                 "accepted": accepted,
                 "refusal_reason": refusal_reason,
                 "response_time_ms": response_time_ms,
-                "prediction_data": rebalance_data,
+                "prediction_data": serialized_data,
             },
         )
 
         logger.debug(f"Saved decision for miner {miner_uid} in round {round_id}")
         return prediction_id
+
+    def _serialize_rebalance_data(self, rebalance_data: Optional[List[Dict]]) -> Optional[List[Dict]]:
+        """
+        Serialize rebalance_data to make it JSON-serializable.
+        Converts Inventory and Position objects to dictionaries.
+
+        Args:
+            rebalance_data: List of rebalancing decision dictionaries
+
+        Returns:
+            Serialized list of dictionaries
+        """
+        if rebalance_data is None:
+            return None
+
+        serialized = []
+        for item in rebalance_data:
+            if not isinstance(item, dict):
+                continue
+
+            serialized_item = {}
+            for key, value in item.items():
+                # Handle Inventory objects
+                if hasattr(value, 'amount0') and hasattr(value, 'amount1'):
+                    # It's an Inventory object (Pydantic model)
+                    serialized_item[key] = {
+                        "amount0": str(value.amount0),
+                        "amount1": str(value.amount1)
+                    }
+                # Handle lists of Position objects
+                elif isinstance(value, list) and len(value) > 0:
+                    if hasattr(value[0], 'tick_lower') and hasattr(value[0], 'tick_upper'):
+                        # It's a list of Position objects
+                        serialized_item[key] = [
+                            {
+                                "tick_lower": pos.tick_lower,
+                                "tick_upper": pos.tick_upper,
+                                "allocation0": str(pos.allocation0),
+                                "allocation1": str(pos.allocation1),
+                                **({"confidence": pos.confidence} if hasattr(pos, 'confidence') and pos.confidence is not None else {})
+                            }
+                            for pos in value
+                        ]
+                    else:
+                        # Regular list, keep as is
+                        serialized_item[key] = value
+                # Handle datetime objects
+                elif hasattr(value, 'isoformat'):
+                    # datetime or date object
+                    serialized_item[key] = value.isoformat()
+                else:
+                    # Regular value (str, int, float, dict, etc.)
+                    serialized_item[key] = value
+
+            serialized.append(serialized_item)
+
+        return serialized
 
     async def get_round_predictions(self, round_id: str) -> List[Prediction]:
         """
@@ -311,7 +372,8 @@ class JobRepository:
             min_score: Minimum combined score threshold
 
         Returns:
-            List of eligible MinerScore objects, sorted by score descending
+            List of eligible MinerScore objects, sorted by score descending.
+            Tie-break: total_evaluations desc, then total_live_rounds desc.
         """
         job = await Job.get(job_id=job_id)
 
@@ -319,9 +381,32 @@ class JobRepository:
             job=job,
             is_eligible_for_live=True,
             combined_score__gte=Decimal(str(min_score)),
-        ).order_by("-combined_score")
+        ).order_by("-combined_score", "-total_evaluations", "-total_live_rounds")
 
         return scores
+
+    async def get_historic_combined_scores(
+        self, job_id: str, miner_uids: List[int]
+    ) -> Dict[int, float]:
+        """
+        Get combined_score for miners **before** any updates this round.
+        Used for tie-breaking when selecting evaluation round winner.
+
+        Args:
+            job_id: Job identifier
+            miner_uids: UIDs to look up
+
+        Returns:
+            Dict mapping miner_uid -> combined_score (0.0 if no MinerScore)
+        """
+        if not miner_uids:
+            return {}
+        job = await Job.get(job_id=job_id)
+        rows = await MinerScore.filter(
+            job=job,
+            miner_uid__in=miner_uids,
+        ).values_list("miner_uid", "combined_score")
+        return {uid: float(cs) for uid, cs in rows}
 
     async def complete_round(
         self, round_id: str, winner_uid: Optional[int], performance_data: Optional[Dict]
@@ -368,6 +453,26 @@ class JobRepository:
 
         return round_obj.winner_uid if round_obj else None
 
+    async def get_top_miners_by_job(self) -> Dict[str, int]:
+        """
+        Get the top miner UID for each active job (one winner per job).
+        Uses combined_score; ties broken by total_evaluations, then total_live_rounds.
+
+        Returns:
+            Dict mapping job_id -> miner_uid
+        """
+        jobs = await Job.filter(is_active=True)
+        winners = {}
+        for job in jobs:
+            top = await MinerScore.filter(job=job).order_by(
+                "-combined_score",
+                "-total_evaluations",
+                "-total_live_rounds",
+            ).first()
+            if top:
+                winners[job.job_id] = top.miner_uid
+        return winners
+
     async def create_live_execution(
         self,
         round_id: str,
@@ -399,7 +504,7 @@ class JobRepository:
             round=round_obj,
             job=job,
             miner_uid=miner_uid,
-            sn_liquditiy_manager_address=job.sn_liquditiy_manager_address,
+            sn_liquidity_manager_address=job.sn_liquidity_manager_address,
             strategy_data=strategy_data,
             tx_hash=tx_hash,
             tx_status="pending" if tx_hash else None,

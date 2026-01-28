@@ -202,11 +202,18 @@ class BacktesterService:
         final_sqrt_price_x96 = await self.db.get_sqrt_price_at_block(
             pair_address, end_block
         )
+        initial_sqrt_price_x96 = await self.db.get_sqrt_price_at_block(
+            pair_address, start_block
+        )
 
         # price in Q192 (token1/token0)
         final_price_x192 = (
             final_sqrt_price_x96 * final_sqrt_price_x96
         )  # equivalent of final_sqrt_price_x96 ^ 2
+        initial_price_x192 = (
+            initial_sqrt_price_x96 * initial_sqrt_price_x96
+        )
+
         # get amounts currently in pool
         amount0_deployed, amount1_deployed = 0, 0
         for position in rebalance_history[0]["new_positions"]:
@@ -220,7 +227,7 @@ class BacktesterService:
             amount0_deployed += int(amount0)
             amount1_deployed += int(amount1)
 
-        final_inventory = rebalance_history[0]["inventory"]
+        final_inventory: Inventory = rebalance_history[0]["inventory"]
 
         # HODL value (token1 units, int-only)
         # IMPORTANT: HODL uses INITIAL inventory, valued at FINAL price
@@ -237,6 +244,19 @@ class BacktesterService:
             amount0_holdings * final_price_x192
         ) // UniswapV3Math.Q192 + amount1_holdings
 
+        # Fees (valued in token1 units)
+        fees_collected = (
+            total_fees0 * final_price_x192
+        ) // UniswapV3Math.Q192 + total_fees1
+        
+        # Initial Value (at start price)
+        initial_value = (
+            int(initial_inventory.amount0) * initial_price_x192
+        ) // UniswapV3Math.Q192 + int(initial_inventory.amount1)
+        
+        # Final Value (LP + Fees)
+        final_value = lp_value_deployed + fees_collected
+
         # Impermanent loss (ratio, float only at the very end)
         if hodl_value_deployed > 0:
             impermanent_loss = max(
@@ -250,10 +270,6 @@ class BacktesterService:
         # In-range ratio
         in_range_ratio = in_range_count / total_swaps if total_swaps > 0 else 0.0
 
-        # Fees (valued in token1 units)
-        fees_collected = (
-            total_fees0 * final_price_x192
-        ) // UniswapV3Math.Q192 + total_fees1
         return {
             "fees_collected": fees_collected,
             "impermanent_loss": impermanent_loss,
@@ -265,4 +281,8 @@ class BacktesterService:
             "amount0_holdings": amount0_holdings,
             "amount1_holdings": amount1_holdings,
             "final_sqrt_price_x96": final_sqrt_price_x96,
+            "initial_value": initial_value,
+            "final_value": final_value,
+            "initial_inventory": initial_inventory,
+            "final_inventory": final_inventory,
         }

@@ -12,6 +12,7 @@ from web3 import Web3
 from web3.contract import AsyncContract
 
 from protocol import Inventory, Position
+from validator.utils.math import UniswapV3Math
 from validator.utils.web3 import AsyncWeb3Helper, ZERO_ADDRESS
 
 logger = logging.getLogger(__name__)
@@ -219,6 +220,9 @@ class SnLiqManagerService:
 
         logger.debug(f"Position manager: {position_manager_address}")
 
+        # Get current pool price for amount calculations
+        current_sqrt_price_x96 = await self.get_current_price()
+
         # 4. Get token IDs from position manager
         pos_manager_contract = AsyncWeb3Helper.make_web3(chain_id=self.chain_id).make_contract_by_name(
             name="AeroCLPositionManager",
@@ -262,14 +266,20 @@ class SnLiqManagerService:
                     f"liquidity {liquidity}"
                 )
 
-                # Convert liquidity to amounts (simplified - using liquidity as allocation)
-                # In production, you'd calculate proper token amounts based on liquidity and ticks
+                # Convert liquidity to actual amounts based on current price
+                amount0, amount1 = UniswapV3Math.get_amounts_for_liquidity(
+                    current_sqrt_price_x96,
+                    UniswapV3Math.get_sqrt_ratio_at_tick(tick_lower),
+                    UniswapV3Math.get_sqrt_ratio_at_tick(tick_upper),
+                    liquidity,
+                )
+
                 positions.append(
                     Position(
                         tick_lower=tick_lower,
                         tick_upper=tick_upper,
-                        allocation0=str(liquidity // 2),  # Simplified allocation
-                        allocation1=str(liquidity // 2),  # Simplified allocation
+                        allocation0=str(amount0),
+                        allocation1=str(amount1),
                     )
                 )
             except Exception as e:

@@ -41,15 +41,15 @@ class Job(Model):
     Represents a vault managing liquidity for a specific trading pair.
     """
 
-    id = fields.IntField(pk=True)
-    job_id = fields.CharField(max_length=255, unique=True, index=True)
-    sn_liquditiy_manager_address = fields.CharField(max_length=42)
+    id = fields.IntField(primary_key=True)
+    job_id = fields.CharField(max_length=255, unique=True, db_index=True)
+    sn_liquidity_manager_address = fields.CharField(max_length=42)
     pair_address = fields.CharField(max_length=42)
     fee_rate = fields.FloatField(default=0.03)
     target = fields.CharField(max_length=50, default="PoL")
     target_ratio = fields.FloatField(default=0.5)
     chain_id = fields.IntField(default=8453)
-    is_active = fields.BooleanField(default=True, index=True)
+    is_active = fields.BooleanField(default=True, db_index=True)
     round_duration_seconds = fields.IntField(default=900)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
@@ -73,19 +73,19 @@ class Round(Model):
     Each round tests miners and selects a winner.
     """
 
-    id = fields.IntField(pk=True)
-    round_id = fields.CharField(max_length=255, unique=True, index=True)
+    id = fields.IntField(primary_key=True)
+    round_id = fields.CharField(max_length=255, unique=True, db_index=True)
     job = fields.ForeignKeyField(
         "models.Job", related_name="rounds", on_delete=fields.CASCADE
     )
-    round_type = fields.CharEnumField(RoundType, index=True)
+    round_type = fields.CharEnumField(RoundType, db_index=True)
     round_number = fields.IntField()
     start_time = fields.DatetimeField()
     round_deadline = fields.DatetimeField()
     end_time = fields.DatetimeField(null=True)
     winner_uid = fields.IntField(null=True)
     start_block = fields.IntField()
-    status = fields.CharEnumField(RoundStatus, default=RoundStatus.PENDING, index=True)
+    status = fields.CharEnumField(RoundStatus, default=RoundStatus.PENDING, db_index=True)
     performance_data = fields.JSONField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
 
@@ -107,15 +107,15 @@ class Prediction(Model):
     Stores whether miner accepted the job and their rebalancing decisions.
     """
 
-    id = fields.IntField(pk=True)
-    prediction_id = fields.CharField(max_length=255, unique=True, index=True)
+    id = fields.IntField(primary_key=True)
+    prediction_id = fields.CharField(max_length=255, unique=True, db_index=True)
     round = fields.ForeignKeyField(
         "models.Round", related_name="predictions", on_delete=fields.CASCADE
     )
     job = fields.ForeignKeyField(
         "models.Job", related_name="predictions", on_delete=fields.CASCADE
     )
-    miner_uid = fields.IntField(index=True)
+    miner_uid = fields.IntField(db_index=True)
     miner_hotkey = fields.CharField(max_length=66)
     accepted = fields.BooleanField(default=False)
     refusal_reason = fields.TextField(null=True)
@@ -140,18 +140,18 @@ class MinerScore(Model):
     Tracks historical performance using exponential moving averages.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     job = fields.ForeignKeyField(
         "models.Job", related_name="miner_scores", on_delete=fields.CASCADE
     )
-    miner_uid = fields.IntField(index=True)
+    miner_uid = fields.IntField(db_index=True)
     miner_hotkey = fields.CharField(max_length=66)
 
     # Score components
     evaluation_score = fields.DecimalField(max_digits=10, decimal_places=6, default=0.0)
     live_score = fields.DecimalField(max_digits=10, decimal_places=6, default=0.0)
     combined_score = fields.DecimalField(
-        max_digits=10, decimal_places=6, default=0.0, index=True
+        max_digits=10, decimal_places=6, default=0.0, db_index=True
     )
 
     # Activity tracking
@@ -163,9 +163,9 @@ class MinerScore(Model):
 
     # Participation tracking
     first_seen = fields.DatetimeField(auto_now_add=True)
-    last_active = fields.DatetimeField(auto_now=True, index=True)
+    last_active = fields.DatetimeField(auto_now=True, db_index=True)
     participation_days = fields.IntField(default=0)
-    is_eligible_for_live = fields.BooleanField(default=False, index=True)
+    is_eligible_for_live = fields.BooleanField(default=False, db_index=True)
 
     # Historical data
     score_history = fields.JSONField(null=True)
@@ -191,12 +191,12 @@ class MinerParticipation(Model):
     Used to calculate eligibility for live mode.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     job = fields.ForeignKeyField(
         "models.Job", related_name="participations", on_delete=fields.CASCADE
     )
     miner_uid = fields.IntField()
-    participation_date = fields.DateField(index=True)
+    participation_date = fields.DateField(db_index=True)
     participated = fields.BooleanField(default=True)
     rounds_participated = fields.IntField(default=0)
     rounds_refused = fields.IntField(default=0)
@@ -218,8 +218,8 @@ class LiveExecution(Model):
     Tracks actual position placements and performance.
     """
 
-    id = fields.IntField(pk=True)
-    execution_id = fields.CharField(max_length=255, unique=True, index=True)
+    id = fields.IntField(primary_key=True)
+    execution_id = fields.CharField(max_length=255, unique=True, db_index=True)
     round = fields.ForeignKeyField(
         "models.Round", related_name="executions", on_delete=fields.CASCADE
     )
@@ -227,7 +227,7 @@ class LiveExecution(Model):
         "models.Job", related_name="executions", on_delete=fields.CASCADE
     )
     miner_uid = fields.IntField()
-    sn_liquditiy_manager_address = fields.CharField(max_length=42)
+    sn_liquidity_manager_address = fields.CharField(max_length=42)
 
     # Execution details
     strategy_data = fields.JSONField()
@@ -289,7 +289,7 @@ async def init_db(db_url: Optional[str] = None):
     else:
         await Tortoise.init(config=TORTOISE_ORM)
 
-    await Tortoise.generate_schemas()
+    await Tortoise.generate_schemas(safe=True)
 
 
 async def close_db():

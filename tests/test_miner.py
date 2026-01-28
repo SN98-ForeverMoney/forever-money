@@ -28,6 +28,10 @@ For testing without a local subtensor, you can use the validator's
         --dry-run
 """
 import sys
+import os
+# Add project root to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import bittensor as bt
 from protocol import StrategyRequest, Mode, Inventory
 from validator.models import ValidatorMetadata, Constraints

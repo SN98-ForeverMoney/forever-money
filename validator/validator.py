@@ -15,11 +15,11 @@ import logging
 import sys
 
 import bittensor as bt
-from web3 import AsyncHTTPProvider, AsyncWeb3
 
 from validator.repositories.job import JobRepository
 from validator.models.job import init_db, close_db
 from validator.round_orchestrator import AsyncRoundOrchestrator
+from validator.services.emissions import EmissionsService
 from validator.utils.env import (
     NETUID,
     SUBTENSOR_NETWORK,
@@ -129,6 +129,14 @@ async def run_jobs_validator(config):
     )
     logger.info("Async round orchestrator initialized")
 
+    # Initialize emissions service
+    emissions_service = EmissionsService(
+        metagraph=metagraph,
+        subtensor=subtensor,
+        job_repository=job_repository,
+    )
+    logger.info("Emissions service initialized")
+
     # Track running jobs and their tasks
     running_jobs = {}  # job_id -> task
 
@@ -191,9 +199,25 @@ async def run_jobs_validator(config):
                 logger.error(f"Error in job monitor: {e}", exc_info=True)
                 await asyncio.sleep(check_interval)
 
+    async def monitor_and_set_weights():
+        """Continuously calculate and set weights."""
+        weight_set_interval = 1200  # 20 mins
+        
+        while True:
+            try:
+                logger.info("Running weight setting cycle...")
+                await emissions_service.set_weights_on_chain(wallet, config["netuid"])
+                await asyncio.sleep(weight_set_interval)
+            except Exception as e:
+                logger.error(f"Error in weight setter: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
     try:
-        # Run the job monitor
-        await monitor_and_run_jobs()
+        # Run the job monitor and weight setter concurrently
+        await asyncio.gather(
+            monitor_and_run_jobs(),
+            monitor_and_set_weights(),
+        )
 
     except KeyboardInterrupt:
         logger.info("\n" + "=" * 80)
