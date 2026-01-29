@@ -7,7 +7,7 @@ Handles business logic for miner-owned vault management including:
 - Eligibility filtering for evaluations
 """
 import logging
-from typing import List, Optional, Dict, Set
+from typing import List, Optional, Set
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 
@@ -313,7 +313,10 @@ class VaultService:
             ).call()
 
             # Get current block
-            current_block = await web3_helper.w3.eth.block_number
+            if web3_helper.web3 is None:
+                logger.error("AsyncWeb3Helper.web3 is not initialized; cannot record vault snapshot")
+                return None
+            current_block = await web3_helper.web3.eth.block_number
 
             # Calculate USD value (simplified - in production use price service)
             total_value_usd = await self._calculate_vault_value_usd(
