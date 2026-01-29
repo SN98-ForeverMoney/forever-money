@@ -92,3 +92,29 @@ class RebalanceQuery(bt.Synapse):
         from the miner's axon.
         """
         return self
+
+
+class VaultRegistrationQuery(bt.Synapse):
+    """
+    Synapse for querying miners about their vault registration.
+
+    Validators send this to miners who are not yet registered in the vault database.
+    Miners respond with their vault address if they have one configured.
+
+    Request fields (sent by validator):
+        - (none - just asking for vault info)
+
+    Response fields (returned by miner):
+        - has_vault: Whether miner has a vault configured
+        - vault_address: The vault (LiquidityManager) contract address
+        - chain_id: Chain ID where the vault is deployed
+    """
+
+    # Response fields (miner fills these)
+    has_vault: bool = Field(False, description="Whether miner has a vault configured")
+    vault_address: Optional[str] = Field(None, description="Vault contract address")
+    chain_id: int = Field(8453, description="Chain ID (Base = 8453)")
+
+    def deserialize(self) -> "VaultRegistrationQuery":
+        """Deserialize the synapse response."""
+        return self

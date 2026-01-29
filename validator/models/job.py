@@ -267,7 +267,7 @@ TORTOISE_ORM = {
     },
     "apps": {
         "models": {
-            "models": ["validator.models.job", "aerich.models"],
+            "models": ["validator.models.job", "validator.models.miner_vault", "aerich.models"],
             "default_connection": "default",
         }
     },
@@ -284,7 +284,11 @@ async def init_db(db_url: Optional[str] = None):
     if db_url:
         await Tortoise.init(
             db_url=db_url,
-            modules={"models": ["validator.models.job", "validator.models.pool_events"]}
+            modules={"models": [
+                "validator.models.job",
+                "validator.models.miner_vault",
+                "validator.models.pool_events"
+            ]}
         )
     else:
         await Tortoise.init(config=TORTOISE_ORM)

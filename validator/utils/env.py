@@ -120,3 +120,16 @@ MINER_VERSION = get_env_variable(
     default="0.1.0",
 )
 
+# Vault configuration
+REQUIRE_VAULT_FOR_EVALUATION = get_env_variable(
+    name="REQUIRE_VAULT_FOR_EVALUATION",
+    type_=str,
+    default="false",
+).lower() == "true"
+
+MINIMUM_VAULT_BALANCE_USD = get_env_variable(
+    name="MINIMUM_VAULT_BALANCE_USD",
+    type_=float,
+    default=1000.0,
+)
+

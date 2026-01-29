@@ -15,7 +15,7 @@ import time
 import bittensor as bt
 import requests
 
-from protocol.synapses import RebalanceQuery
+from protocol.synapses import RebalanceQuery, VaultRegistrationQuery
 from protocol.models import Position, Inventory
 from validator.services.backtester import BacktesterService
 from validator.utils.web3 import AsyncWeb3Helper
@@ -25,6 +25,8 @@ from validator.services.liqmanager import SnLiqManagerService
 from validator.repositories.job import JobRepository
 from validator.models.job import Job, Round, RoundType
 from validator.services.scorer import Scorer
+from validator.services.vault import VaultService
+import time as time_module
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,10 @@ class AsyncRoundOrchestrator:
         self.rebalance_check_interval = config.get("rebalance_check_interval", 100)
         self.backtester = BacktesterService(PoolDataDB())
 
+        # Vault service for miner eligibility filtering
+        self.vault_service = VaultService()
+        self.require_vault_for_evaluation = config.get("require_vault_for_evaluation", False)
+
     async def _initialize_round_numbers(self, job: Job):
         """
         Initialize round numbers from database for a job.
@@ -96,6 +102,109 @@ class AsyncRoundOrchestrator:
             f"evaluation={self.round_numbers[job.job_id]['evaluation']}, "
             f"live={self.round_numbers[job.job_id]['live']}"
         )
+
+    async def _check_and_register_new_miners(self):
+        """
+        Check for miners in metagraph that are not registered in vault DB.
+
+        For each unregistered miner, send a VaultRegistrationQuery to get
+        their vault address, then register and verify it.
+        """
+        # 1. Get all active miners from metagraph
+        metagraph_uids = [
+            uid for uid in range(len(self.metagraph.S)) if self.metagraph.S[uid] > 0
+        ]
+
+        if not metagraph_uids:
+            logger.debug("No active miners in metagraph")
+            return
+
+        # 2. Get already registered miners from DB
+        registered_uids = await self.vault_service.vault_repository.get_registered_miner_uids()
+
+        # 3. Find unregistered miners
+        unregistered_uids = set(metagraph_uids) - set(registered_uids)
+
+        if not unregistered_uids:
+            logger.debug("All active miners already registered")
+            return
+
+        logger.info(
+            f"Found {len(unregistered_uids)} unregistered miners, "
+            f"querying for vault info..."
+        )
+
+        # 4. Query each unregistered miner for vault info
+        for uid in unregistered_uids:
+            try:
+                await self._query_and_register_miner_vault(uid)
+            except Exception as e:
+                logger.error(f"Error registering miner {uid}: {e}")
+
+    async def _query_and_register_miner_vault(self, miner_uid: int):
+        """
+        Query a single miner for vault info and register if provided.
+
+        Args:
+            miner_uid: Miner's UID to query
+        """
+        miner_hotkey = self.metagraph.hotkeys[miner_uid]
+        miner_axon = self.metagraph.axons[miner_uid]
+
+        logger.debug(f"Querying miner {miner_uid} ({miner_hotkey[:8]}...) for vault info")
+
+        # Create and send synapse
+        synapse = VaultRegistrationQuery()
+
+        try:
+            responses = await self.dendrite(
+                axons=[miner_axon],
+                synapse=synapse,
+                timeout=10,
+                deserialize=True,
+            )
+
+            if not responses or len(responses) == 0:
+                logger.debug(f"No response from miner {miner_uid}")
+                return
+
+            response = responses[0]
+
+            if response is None:
+                logger.debug(f"Miner {miner_uid} returned None")
+                return
+
+            if not response.has_vault:
+                logger.debug(f"Miner {miner_uid} has no vault configured")
+                return
+
+            # Miner has a vault - register it
+            logger.info(
+                f"Miner {miner_uid} reported vault: {response.vault_address} "
+                f"(chain {response.chain_id})"
+            )
+
+            # Register and verify the vault
+            vault = await self.vault_service.register_miner_vault(
+                miner_uid=miner_uid,
+                miner_hotkey=miner_hotkey,
+                vault_address=response.vault_address,
+                chain_id=response.chain_id,
+                auto_verify=True,  # Will check associatedMiner() matches
+            )
+
+            if vault.is_verified:
+                logger.info(
+                    f"Successfully registered and verified vault for miner {miner_uid}"
+                )
+            else:
+                logger.warning(
+                    f"Registered vault for miner {miner_uid} but verification failed "
+                    f"(associatedMiner mismatch)"
+                )
+
+        except Exception as e:
+            logger.error(f"Error querying miner {miner_uid} for vault: {e}")
 
     async def run_job_continuously(self, job: Job):
         """
@@ -133,11 +242,12 @@ class AsyncRoundOrchestrator:
         Run an evaluation round for a job.
 
         Steps:
-        1. Get latest block as target
-        2. Generate initial positions (validator-generated)
-        3. Run backtest, querying miners at rebalance checkpoints
-        4. Score all miners
-        5. Select winner
+        1. Check for new miners and register their vaults
+        2. Get latest block as target
+        3. Generate initial positions (validator-generated)
+        4. Run backtest, querying miners at rebalance checkpoints
+        5. Score all miners
+        6. Select winner
 
         Args:
             job: Job to run evaluation for
@@ -152,6 +262,24 @@ class AsyncRoundOrchestrator:
         if len(active_uids) == 0:
             logger.warning("No active miners found.")
             return
+
+        # Filter miners by vault eligibility if required
+        if self.require_vault_for_evaluation:
+            await self._check_and_register_new_miners()
+            eligible_uids = await self.vault_service.filter_eligible_miners(
+                miner_uids=active_uids,
+                require_verified=True,
+                require_minimum_balance=True,
+            )
+            logger.info(
+                f"Vault filtering: {len(active_uids)} active miners -> "
+                f"{len(eligible_uids)} with eligible vaults"
+            )
+            active_uids = eligible_uids
+
+            if len(active_uids) == 0:
+                logger.warning("No miners with eligible vaults found.")
+                return
 
         self.round_numbers[job.job_id]["evaluation"] += 1
         round_number = self.round_numbers[job.job_id]["evaluation"]
@@ -250,13 +378,24 @@ class AsyncRoundOrchestrator:
             logger.info(f"No previous winner for job {job.job_id}, skipping live round")
             return
 
-        # 2. Check eligibility
+        # 2. Check eligibility (7+ days participation)
         miner_score = await self.job_repository.get_eligible_miners(job.job_id)
         # Check if winner is in eligible list
         is_eligible = any(s.miner_uid == winner_uid for s in miner_score)
         if not is_eligible:
-            logger.info(f"Miner {winner_uid} not eligible for live round yet")
+            logger.info(f"Miner {winner_uid} not eligible for live round yet (participation requirement)")
             return
+
+        # 3. Check vault eligibility if required
+        if self.require_vault_for_evaluation:
+            has_vault = await self.vault_service.is_miner_eligible_for_evaluation(
+                miner_uid=winner_uid,
+                require_verified=True,
+                require_minimum_balance=True,
+            )
+            if not has_vault:
+                logger.info(f"Miner {winner_uid} not eligible for live round (no verified vault)")
+                return
 
         logger.info(f"=" * 60)
         logger.info(f"Starting LIVE round for job {job.job_id} with Miner {winner_uid}")
@@ -409,7 +548,7 @@ class AsyncRoundOrchestrator:
                     round_id=round_.round_id,
                     round_type=round_.round_type,
                     block_number=current_block,
-                    current_price=price_at_query,
+                    current_price_sqrtX96=price_at_query,
                     current_positions=current_positions,
                     inventory=current_inventory,
                     rebalances_so_far=rebalances_so_far,
@@ -677,7 +816,7 @@ class AsyncRoundOrchestrator:
                     round_id=round_.round_id,
                     round_type=round_.round_type,
                     block_number=current_block,
-                    current_price=price_at_query,
+                    current_price_x96=price_at_query,
                     current_positions=current_positions,
                     inventory=current_inventory,
                     rebalances_so_far=rebalances_so_far,
@@ -842,7 +981,7 @@ class AsyncRoundOrchestrator:
         round_id: str,
         round_type: str,
         block_number: int,
-        current_price: float,
+        current_price_sqrtX96: int,
         current_positions: List[Position],
         inventory: Inventory,
         rebalances_so_far: int,
@@ -858,7 +997,7 @@ class AsyncRoundOrchestrator:
             round_id: Round identifier
             round_type: 'evaluation' or 'live'
             block_number: Current block
-            current_price: Current price
+            current_price_sqrtX96: Current price
             current_positions: Current positions
             inventory: Available inventory
             rebalances_so_far: Number of rebalances so far
@@ -873,7 +1012,7 @@ class AsyncRoundOrchestrator:
             round_id=round_id,
             round_type=round_type,
             block_number=block_number,
-            current_price=current_price,
+            current_price=current_price_sqrtX96,
             current_positions=current_positions,
             inventory_remaining={
                 "amount0": inventory.amount0,
@@ -884,12 +1023,11 @@ class AsyncRoundOrchestrator:
 
         miner_axon = self.metagraph.axons[miner_uid]
         # Convert sqrtPriceX96 to human-readable price for logging
-        readable_price = UniswapV3Math.sqrt_price_x96_to_price(current_price)
+        readable_price = UniswapV3Math.sqrt_price_x96_to_price(current_price_sqrtX96)
         logger.info(f"[QUERY] >>> Sending to miner {miner_uid} @ {miner_axon.ip}:{miner_axon.port}")
         logger.info(f"[QUERY]     Job: {job_id}, Block: {block_number}, Price: {readable_price:.6f}")
 
         try:
-            import time as time_module
             query_start = time_module.time()
             responses = await self.dendrite(
                 axons=[miner_axon],
@@ -898,7 +1036,7 @@ class AsyncRoundOrchestrator:
                 deserialize=True,
             )
             logger.debug(f"Miner response: {responses[0] if responses else 'None'}")
-
+            query_elapsed = time_module.time() - query_start
             response = responses[0] if responses else None
 
             if response and hasattr(response, "accepted"):
