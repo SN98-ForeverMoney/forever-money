@@ -13,7 +13,7 @@ import logging
 import os
 import subprocess
 import sys
-import unittest.mock
+
 from unittest.mock import MagicMock, AsyncMock
 from decimal import Decimal
 
@@ -28,7 +28,7 @@ from validator.round_orchestrator import AsyncRoundOrchestrator
 from validator.models.job import Job, Round
 from validator.models.miner_vault import MinerVault, VaultSnapshot
 from validator.repositories.job import JobRepository
-from validator.services.vault import VaultService
+
 from protocol import Inventory
 from protocol.synapses import VaultRegistrationQuery
 
