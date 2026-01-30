@@ -5,9 +5,10 @@ Uses Tortoise ORM for all database operations.
 All methods are async.
 """
 import logging
-from typing import List, Optional, Dict
 from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
 
 from validator.models.job import (
     Job,
@@ -21,6 +22,32 @@ from validator.models.job import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _to_json_safe(obj: Any) -> Any:
+    """
+    Recursively convert to JSON-serializable form.
+
+    Uses Pydantic BaseModel.model_dump(mode='json') when applicable;
+    handles datetime/date via isoformat; leaves primitives and dict/list
+    structure intact.
+    """
+
+    if obj is None:
+        return None
+    if isinstance(obj, BaseModel):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, dict):
+        return {k: _to_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_json_safe(v) for v in obj]
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    return obj
 
 
 class JobRepository:
@@ -72,55 +99,6 @@ class JobRepository:
 
         logger.info(f"Created {round_type.value} round: {round_id}")
         return round_obj
-
-    async def get_or_create_round(
-        self,
-        job: Job,
-        round_type: RoundType,
-        round_number: int,
-        start_block: int,
-    ) -> tuple[Round, bool]:
-        """
-        Get existing round or create a new one. Handles restarts gracefully.
-
-        Args:
-            job: Job to create round for
-            round_type: RoundType.EVALUATION or RoundType.LIVE
-            round_number: Sequential round number
-            start_block: Start block for the round
-
-        Returns:
-            Tuple of (Round object, bool indicating if created)
-        """
-        # Check if round already exists
-        existing_round = await Round.filter(
-            job=job,
-            round_type=round_type,
-            round_number=round_number,
-        ).first()
-
-        if existing_round:
-            logger.info(f"Found existing {round_type.value} round #{round_number} for job {job.job_id}")
-            return existing_round, False
-
-        # Create new round
-        start_time = datetime.now(timezone.utc)
-        round_deadline = start_time + timedelta(seconds=job.round_duration_seconds)
-        round_id = f"{job.job_id}_{round_type.value}_{round_number}_{int(start_time.timestamp())}"
-
-        round_obj = await Round.create(
-            round_id=round_id,
-            job=job,
-            round_type=round_type,
-            round_number=round_number,
-            start_time=start_time,
-            round_deadline=round_deadline,
-            start_block=start_block,
-            status=RoundStatus.ACTIVE,
-        )
-
-        logger.info(f"Created {round_type.value} round: {round_id}")
-        return round_obj, True
 
     async def save_rebalance_decision(
         self,
@@ -179,8 +157,10 @@ class JobRepository:
 
     def _serialize_rebalance_data(self, rebalance_data: Optional[List[Dict]]) -> Optional[List[Dict]]:
         """
-        Serialize rebalance_data to make it JSON-serializable.
-        Converts Inventory and Position objects to dictionaries.
+        Serialize rebalance_data to JSON-serializable form.
+
+        Uses Pydantic model_dump(mode='json') for Inventory, Position, etc.;
+        recursively handles nested dicts/lists and datetime/date.
 
         Args:
             rebalance_data: List of rebalancing decision dictionaries
@@ -190,49 +170,8 @@ class JobRepository:
         """
         if rebalance_data is None:
             return None
-
-        serialized = []
-        for item in rebalance_data:
-            if not isinstance(item, dict):
-                continue
-
-            serialized_item = {}
-            for key, value in item.items():
-                # Handle Inventory objects
-                if hasattr(value, 'amount0') and hasattr(value, 'amount1'):
-                    # It's an Inventory object (Pydantic model)
-                    serialized_item[key] = {
-                        "amount0": str(value.amount0),
-                        "amount1": str(value.amount1)
-                    }
-                # Handle lists of Position objects
-                elif isinstance(value, list) and len(value) > 0:
-                    if hasattr(value[0], 'tick_lower') and hasattr(value[0], 'tick_upper'):
-                        # It's a list of Position objects
-                        serialized_item[key] = [
-                            {
-                                "tick_lower": pos.tick_lower,
-                                "tick_upper": pos.tick_upper,
-                                "allocation0": str(pos.allocation0),
-                                "allocation1": str(pos.allocation1),
-                                **({"confidence": pos.confidence} if hasattr(pos, 'confidence') and pos.confidence is not None else {})
-                            }
-                            for pos in value
-                        ]
-                    else:
-                        # Regular list, keep as is
-                        serialized_item[key] = value
-                # Handle datetime objects
-                elif hasattr(value, 'isoformat'):
-                    # datetime or date object
-                    serialized_item[key] = value.isoformat()
-                else:
-                    # Regular value (str, int, float, dict, etc.)
-                    serialized_item[key] = value
-
-            serialized.append(serialized_item)
-
-        return serialized
+        items = [x for x in rebalance_data if isinstance(x, dict)]
+        return _to_json_safe(items)
 
     async def get_round_predictions(self, round_id: str) -> List[Prediction]:
         """

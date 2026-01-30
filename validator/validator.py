@@ -42,6 +42,46 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _is_set(value) -> bool:
+    """Return True if value is set and usable (not None, 'None', or empty string)."""
+    if value is None:
+        return False
+    s = str(value).strip()
+    return s not in ("", "None", "none")
+
+
+def validate_config(config: dict) -> None:
+    """
+    Validate required config after assembly. Exit with code 1 if any check fails.
+    Focus on DB and executor bot - the main external dependencies.
+    """
+    errors: list[str] = []
+
+    # Database: tortoise_db_url must be valid
+    db_url = config.get("tortoise_db_url") or ""
+    if not _is_set(db_url):
+        errors.append("Database URL not configured (JOBS_POSTGRES_* env vars)")
+    elif "postgres://" not in db_url and "postgresql://" not in db_url:
+        errors.append("Database URL must be postgres:// or postgresql://")
+
+    # Executor bot (required for live rounds)
+    url = config.get("executor_bot_url")
+    if not _is_set(url):
+        errors.append("EXECUTOR_BOT_URL must be set (e.g. http://localhost:8000)")
+    elif not (str(url).startswith("http://") or str(url).startswith("https://")):
+        errors.append("EXECUTOR_BOT_URL must start with http:// or https://")
+
+    if not _is_set(config.get("executor_bot_api_key")):
+        errors.append("EXECUTOR_BOT_API_KEY must be set")
+
+    if errors:
+        logger.error("Config validation failed:")
+        for e in errors:
+            logger.error(f"  - {e}")
+        logger.error("Please set required environment variables and restart.")
+        sys.exit(1)
+
+
 def get_config():
     """Load configuration from environment and arguments."""
     parser = argparse.ArgumentParser(description="SN98 ForeverMoney Validator")
@@ -244,6 +284,7 @@ def main():
     """Main validator entry point."""
     try:
         config = get_config()
+        validate_config(config)
         asyncio.run(run_jobs_validator(config))
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)

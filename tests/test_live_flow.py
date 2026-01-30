@@ -7,13 +7,14 @@ import os
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import requests
+import httpx
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta, timezone
 
 from tortoise import Tortoise
 
 from validator.round_orchestrator import AsyncRoundOrchestrator
+from validator.orchestrator.executor import execute_strategy_onchain
 from validator.models.job import Job, Round, LiveExecution, MinerScore, RoundType, RoundStatus
 from validator.repositories.job import JobRepository
 from validator.utils.env import (
@@ -67,7 +68,7 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
         self.patcher_web3 = patch("validator.round_orchestrator.AsyncWeb3Helper")
         self.mock_web3_cls = self.patcher_web3.start()
         self.mock_web3 = self.mock_web3_cls.make_web3.return_value
-        self.mock_web3.web3.eth.block_number = 100
+        self.mock_web3.web3.eth.block_number = AsyncMock(return_value=100)
         
         # Patch liq manager
         self.patcher_liq = patch("validator.round_orchestrator.SnLiqManagerService")
@@ -161,16 +162,18 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
         response.desired_positions = [Position(tick_lower=-100, tick_upper=100, allocation0="500", allocation1="500")]
         self.mock_dendrite.return_value = [response]
         
-        # Mock Execution with requests
-        with patch("requests.post") as mock_post:
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = {"tx_hash": "0x123"}
-            mock_response.text = ""
-            
-            mock_post.return_value = mock_response
+        # Mock Execution with httpx
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"tx_hash": "0x123"}
+        mock_response.text = ""
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_async_client = MagicMock()
+        mock_async_client.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_async_client.return_value.__aexit__ = AsyncMock(return_value=None)
 
+        with patch("validator.orchestrator.executor.httpx.AsyncClient", mock_async_client):
             # Run Live Round
             await self.orchestrator.run_live_round(job)
             
@@ -181,7 +184,7 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             live_round = live_rounds[0]
             
             # Check execution was called
-            mock_post.assert_called()
+            mock_client.post.assert_called()
             
             # Check LiveExecution was created in REAL DB
             executions = await LiveExecution.filter(round_id=live_round.id).all()
@@ -251,23 +254,25 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
         position = Position(tick_lower=-100, tick_upper=100, allocation0="500", allocation1="500")
         rebalance_history = [{"new_positions": [position]}]
         
-        with patch("requests.post") as mock_post:
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = {"tx_hash": "0xabc123"}
-            mock_response.text = ""
-            
-            mock_post.return_value = mock_response
-            
-            result = await self.orchestrator._execute_strategy_onchain(
-                job=job,
-                round_obj=round_obj,
-                miner_uid=0,
-                rebalance_history=rebalance_history
-            )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"tx_hash": "0xabc123"}
+        mock_response.text = ""
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_async_client = MagicMock()
+        mock_async_client.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_async_client.return_value.__aexit__ = AsyncMock(return_value=None)
 
-            print(result)
+        with patch("validator.orchestrator.executor.httpx.AsyncClient", mock_async_client):
+            result = await execute_strategy_onchain(
+                self.repo,
+                self.config,
+                job,
+                round_obj,
+                0,
+                rebalance_history,
+            )
             
             assert result["success"] is True
             assert result["tx_hash"] == "0xabc123"
@@ -304,21 +309,25 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
         position = Position(tick_lower=-100, tick_upper=100, allocation0="500", allocation1="500")
         rebalance_history = [{"new_positions": [position]}]
         
-        with patch("requests.post") as mock_post:
-            # Mock failed response
-            mock_response = MagicMock()
-            mock_response.status_code = 500
-            mock_response.text = "Internal Server Error"
-            
-            mock_post.return_value = mock_response
-            
-            result = await self.orchestrator._execute_strategy_onchain(
-                job=job,
-                round_obj=round_obj,
-                miner_uid=0,
-                rebalance_history=rebalance_history
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_async_client = MagicMock()
+        mock_async_client.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_async_client.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("validator.orchestrator.executor.httpx.AsyncClient", mock_async_client):
+            result = await execute_strategy_onchain(
+                self.repo,
+                self.config,
+                job,
+                round_obj,
+                0,
+                rebalance_history,
             )
-            
+
             assert result["success"] is False
             assert result["tx_hash"] is None
             assert "Executor bot returned status 500" in result["error"]
@@ -356,15 +365,20 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
         position = Position(tick_lower=-100, tick_upper=100, allocation0="500", allocation1="500")
         rebalance_history = [{"new_positions": [position]}]
         
-        with patch("requests.post") as mock_post:
-            # Mock network error
-            mock_post.side_effect = requests.RequestException("Connection failed")
-            
-            result = await self.orchestrator._execute_strategy_onchain(
-                job=job,
-                round_obj=round_obj,
-                miner_uid=0,
-                rebalance_history=rebalance_history
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.RequestError("Connection failed"))
+        mock_async_client = MagicMock()
+        mock_async_client.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_async_client.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("validator.orchestrator.executor.httpx.AsyncClient", mock_async_client):
+            result = await execute_strategy_onchain(
+                self.repo,
+                self.config,
+                job,
+                round_obj,
+                0,
+                rebalance_history,
             )
             
             assert result["success"] is False

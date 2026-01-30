@@ -1,8 +1,23 @@
 import aiohttp
 import logging
-from typing import Optional
+from typing import Dict, Optional
 import bittensor as bt
 import asyncio
+
+import sys
+import os
+
+# Setup path for running as script - must be before any validator imports
+# Check if validator module is importable, if not, add project root to path
+try:
+    import validator
+except ImportError:
+    # Add project root to path BEFORE any validator imports
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    os.chdir(project_root)
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +28,17 @@ class PriceService:
     BASE_URL = "https://api.coingecko.com/api/v3"
     COINGECKO_TAO_ID = "bittensor"  # Bittensor TAO on Coingecko
     COINGECKO_ALPHA_ID = "forevermoney"  # Alpha on Coingecko
+
+    # CoinGecko asset platform IDs by chain_id (for /coins/{id}/contract/{addr}/market_chart)
+    CHAIN_ID_TO_PLATFORM: Dict[int, str] = {
+        1: "ethereum",
+        8453: "base",
+        137: "polygon-pos",
+        42161: "arbitrum-one",
+        10: "optimistic-ethereum",
+        43114: "avalanche",
+        56: "binance-smart-chain",
+    }
 
     @staticmethod
     async def get_tao_price_usd() -> float:
@@ -85,16 +111,101 @@ class PriceService:
     @staticmethod
     async def get_token_price(token_address: str, chain_id: int = 8453) -> float:
         """
-        Get token price from Coingecko or on-chain DEX.
+        Get current token price in USD from CoinGecko.
 
         Args:
-            token_address: Token contract address
-            chain_id: Chain ID (e.g., 8453 for Base)
+            token_address: Token contract address (with or without 0x).
+            chain_id: Chain ID (e.g. 8453 for Base). Must map to a CoinGecko
+                asset platform (ethereum, base, polygon-pos, etc.).
 
         Returns:
-            Token price in USD
+            Token price in USD, or 1.0 on error / unknown platform.
         """
-        # TODO: Implement real fetching from Coingecko or DEX
-        # For now, return placeholder
-        logger.warning(f"get_token_price not fully implemented for {token_address}")
-        return 1.0
+        platform = PriceService.CHAIN_ID_TO_PLATFORM.get(chain_id)
+        if not platform:
+            logger.warning(
+                f"get_token_price: chain_id={chain_id} not in CHAIN_ID_TO_PLATFORM, "
+                "using 1.0"
+            )
+            return 1.0
+
+        raw = (token_address or "").strip()
+        if not raw:
+            logger.warning("get_token_price: empty token_address")
+            return 1.0
+        low = raw.lower()
+        addr = low if low.startswith("0x") else "0x" + low
+
+        url = (
+            f"{PriceService.BASE_URL}/coins/{platform}/contract/{addr}/market_chart"
+        )
+        params = {"vs_currency": "usd", "days": "1"}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params=params, timeout=aiohttp.ClientTimeout(total=15)
+                ) as response:
+                    if response.status != 200:
+                        logger.warning(
+                            f"Response returned {response.status} for {token_address} on {platform}"
+                        )
+                        return 1.0
+                    data = await response.json()
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Timeout fetching token price for {token_address} (chain_id={chain_id})"
+            )
+            return 1.0
+        except Exception as e:
+            logger.error(f"Failed to fetch token price for {token_address}: {e}")
+            return 1.0
+
+        prices = data.get("prices") or []
+        if not prices:
+            logger.warning(
+                f"Response returned no prices for {token_address} on {platform}"
+            )
+            return 1.0
+
+        # prices = [[timestamp_ms, price], ...]; use latest (last) price
+        prices.sort(key=lambda p: p[0])
+        _, last_price = prices[-1]
+        return float(last_price)
+
+# Test runner
+if __name__ == "__main__":
+    import asyncio
+    
+    # Setup logging (path already set up at top of file)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    
+    async def test_price_service():
+        """Test PriceService functionality."""
+        print("=" * 60)
+        print("Testing PriceService")
+        print("=" * 60)
+        
+        # Test TAO price
+        print("\n1. Fetching TAO price from Coingecko...")
+        tao_price = await PriceService.get_tao_price_usd()
+        print(f"   TAO Price: ${tao_price:.2f} USD")
+        
+        # Test Alpha price (requires subtensor + netuid; run emissions.py for full test)
+        print("\n2. Alpha price: use get_alpha_price_usd(subtensor, netuid) = alpha_price_tao * tao_price_usd")
+        
+        # Test token price (placeholder)
+        print("\n3. Testing token price...")
+        token_price = await PriceService.get_token_price("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", chain_id=1)
+        print(token_price)
+        print(f"   Token Price: ${token_price:.4f} USD")
+        
+        print("\n" + "=" * 60)
+        print("PriceService test completed!")
+        print("=" * 60)
+    
+    # Run test
+    asyncio.run(test_price_service())
