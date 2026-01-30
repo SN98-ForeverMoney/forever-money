@@ -15,6 +15,7 @@ from web3 import Web3
 
 from validator.repositories.vault import VaultRepository
 from validator.models.miner_vault import MinerVault, VaultSnapshot
+from validator.utils.env import MINIMUM_VAULT_BALANCE_USD
 from validator.utils.web3 import AsyncWeb3Helper, ZERO_ADDRESS
 from validator.utils.crypto import ss58_to_bytes32, is_valid_ss58
 from validator.services.price import PriceService
@@ -34,7 +35,7 @@ class VaultService:
         self,
         vault_repository: Optional[VaultRepository] = None,
         price_service: Optional[PriceService] = None,
-        default_minimum_usd: Decimal = Decimal("1000.00"),
+        default_minimum_usd: Decimal = MINIMUM_VAULT_BALANCE_USD,
     ):
         """
         Initialize the vault service.

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from validator.models.miner_vault import MinerVault, VaultSnapshot
+from validator.utils.env import MINIMUM_VAULT_BALANCE_USD
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class VaultRepository:
         miner_hotkey: str,
         vault_address: str,
         chain_id: int = 8453,
-        minimum_balance_usd: Decimal = Decimal("1000.00"),
+        minimum_balance_usd: Decimal = MINIMUM_VAULT_BALANCE_USD,
     ) -> MinerVault:
         """
         Register a new miner vault.

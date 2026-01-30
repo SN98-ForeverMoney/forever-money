@@ -103,7 +103,7 @@ class AsyncRoundOrchestrator:
             f"live={self.round_numbers[job.job_id]['live']}"
         )
 
-    async def _check_and_register_new_miners(self):
+    async def _check_and_register_new_miners_in_db(self):
         """
         Check for miners in metagraph that are not registered in vault DB.
 
@@ -265,7 +265,7 @@ class AsyncRoundOrchestrator:
 
         # Filter miners by vault eligibility if required
         if self.require_vault_for_evaluation:
-            await self._check_and_register_new_miners()
+            await self._check_and_register_new_miners_in_db()
             eligible_uids = await self.vault_service.filter_eligible_miners(
                 miner_uids=active_uids,
                 require_verified=True,

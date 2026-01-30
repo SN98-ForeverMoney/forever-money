@@ -127,8 +127,8 @@ REQUIRE_VAULT_FOR_EVALUATION = get_env_variable(
     default="false",
 ).lower() == "true"
 
-MINIMUM_VAULT_BALANCE_USD = get_env_variable(
-    name="MINIMUM_VAULT_BALANCE_USD",
+DEFAULT_MINIMUM_VAULT_BALANCE_USD = get_env_variable(
+    name="DEFAULT_MINIMUM_VAULT_BALANCE_USD",
     type_=float,
     default=1000.0,
 )

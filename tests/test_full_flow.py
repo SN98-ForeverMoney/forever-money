@@ -218,7 +218,7 @@ async def test_full_flow():
             logger.info("Verified: No vaults registered initially")
 
             # Run the registration check (this queries miners for their vault info)
-            await orchestrator._check_and_register_new_miners()
+            await orchestrator._check_and_register_new_miners_in_db()
 
             # Verify miner's vault was registered
             registered_after = await MinerVault.all()
@@ -354,7 +354,7 @@ async def test_vault_registration_without_miner_vault():
         )
 
         # Run registration check
-        await orchestrator._check_and_register_new_miners()
+        await orchestrator._check_and_register_new_miners_in_db()
 
         # Verify no vault was registered
         vaults = await MinerVault.all()

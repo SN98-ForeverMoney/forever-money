@@ -725,7 +725,7 @@ class TestVaultRegistrationFlow:
         # Should not query any miners
         orchestrator._query_and_register_miner_vault = AsyncMock()
 
-        await orchestrator._check_and_register_new_miners()
+        await orchestrator._check_and_register_new_miners_in_db()
 
         orchestrator._query_and_register_miner_vault.assert_not_called()
 
@@ -758,7 +758,7 @@ class TestVaultRegistrationFlow:
         # Mock the query method
         orchestrator._query_and_register_miner_vault = AsyncMock()
 
-        await orchestrator._check_and_register_new_miners()
+        await orchestrator._check_and_register_new_miners_in_db()
 
         # Should query miners 1 and 2 (unregistered)
         assert orchestrator._query_and_register_miner_vault.call_count == 2

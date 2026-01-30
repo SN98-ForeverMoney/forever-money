@@ -8,6 +8,8 @@ from decimal import Decimal
 from tortoise import fields
 from tortoise.models import Model
 
+from validator.utils.env import DEFAULT_MINIMUM_VAULT_BALANCE_USD
+
 
 class MinerVault(Model):
     """
@@ -28,7 +30,7 @@ class MinerVault(Model):
 
     # Balance requirements
     minimum_balance_usd = fields.DecimalField(
-        max_digits=18, decimal_places=2, default=Decimal("1000.00")
+        max_digits=18, decimal_places=2, default=Decimal(DEFAULT_MINIMUM_VAULT_BALANCE_USD)
     )
 
     # Timestamps
