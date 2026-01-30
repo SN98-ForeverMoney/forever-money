@@ -54,9 +54,11 @@ class VaultRepository:
         if created:
             logger.info(f"Registered new vault {vault_address} for miner {miner_uid}")
         else:
-            # Update miner info if vault already exists
+            # Update vault metadata if it already exists
             vault.miner_uid = miner_uid
             vault.miner_hotkey = miner_hotkey
+            vault.chain_id = chain_id
+            vault.minimum_balance_usd = minimum_balance_usd
             vault.is_active = True
             await vault.save()
             logger.info(f"Updated vault {vault_address} for miner {miner_uid}")
