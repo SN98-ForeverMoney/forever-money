@@ -31,6 +31,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
+    REQUIRE_VAULT_FOR_EVALUATION,
 )
 
 # Configure logging
@@ -77,6 +78,7 @@ def get_config():
         "executor_bot_url": EXECUTOR_BOT_URL,
         "executor_bot_api_key": EXECUTOR_BOT_API_KEY,
         "rebalance_check_interval": REBALANCE_CHECK_INTERVAL,
+        "require_vault_for_evaluation": REQUIRE_VAULT_FOR_EVALUATION,
     }
 
     # Build Tortoise DB URL from environment
