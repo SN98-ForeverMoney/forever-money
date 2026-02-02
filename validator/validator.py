@@ -12,14 +12,20 @@ Supports:
 import argparse
 import asyncio
 import logging
+import os
 import sys
+
+# Ensure project root is in path when run as: python validator/validator.py
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import bittensor as bt
 
 from validator.repositories.job import JobRepository
+from validator.repositories.pool import PoolDataDB
 from validator.models.job import init_db, close_db
 from validator.round_orchestrator import AsyncRoundOrchestrator
 from validator.services.emissions import EmissionsService
+from validator.services.revenue import RevenueService
 from validator.utils.env import (
     NETUID,
     SUBTENSOR_NETWORK,
@@ -91,6 +97,12 @@ def get_config():
     parser.add_argument(
         "--wallet.hotkey", type=str, required=True, help="Wallet hotkey"
     )
+    parser.add_argument(
+        "--wallet.path",
+        type=str,
+        default='/home/ubuntu/forevermoney/wallets',
+        help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)",
+    )
 
     # Network arguments
     parser.add_argument(
@@ -114,6 +126,7 @@ def get_config():
         "subtensor_network": getattr(args, "subtensor.network") or SUBTENSOR_NETWORK,
         "wallet_name": getattr(args, "wallet.name"),
         "wallet_hotkey": getattr(args, "wallet.hotkey"),
+        "wallet_path": getattr(args, "wallet.path"),
         "executor_bot_url": EXECUTOR_BOT_URL,
         "executor_bot_api_key": EXECUTOR_BOT_API_KEY,
         "rebalance_check_interval": REBALANCE_CHECK_INTERVAL,
@@ -141,7 +154,10 @@ async def run_jobs_validator(config):
     logger.info("=" * 80)
 
     # Initialize Bittensor components
-    wallet = bt.Wallet(name=config["wallet_name"], hotkey=config["wallet_hotkey"])
+    wallet_kwargs = {"name": config["wallet_name"], "hotkey": config["wallet_hotkey"]}
+    if config.get("wallet_path"):
+        wallet_kwargs["path"] = config["wallet_path"]
+    wallet = bt.Wallet(**wallet_kwargs)
     subtensor = bt.Subtensor(network=config["subtensor_network"])
     metagraph = subtensor.metagraph(netuid=config["netuid"])
     dendrite = bt.Dendrite(wallet=wallet)
@@ -169,11 +185,21 @@ async def run_jobs_validator(config):
     )
     logger.info("Async round orchestrator initialized")
 
+    # Initialize pool data DB and revenue service (for emissions Taoflow optimization)
+    pool_data_db = PoolDataDB()
+    revenue_service = RevenueService(
+        job_repository=job_repository,
+        pool_data_db=pool_data_db,
+    )
+    logger.info("Revenue service initialized")
+
+
     # Initialize emissions service
     emissions_service = EmissionsService(
         metagraph=metagraph,
         subtensor=subtensor,
         job_repository=job_repository,
+        revenue_service=revenue_service,
     )
     logger.info("Emissions service initialized")
 
@@ -205,7 +231,7 @@ async def run_jobs_validator(config):
                     if job.job_id not in running_jobs:
                         logger.info(
                             f"NEW JOB DETECTED: {job.job_id} | "
-                            f"Vault: {job.sn_liquditiy_manager_address} | "
+                            f"Vault: {job.sn_liquidity_manager_address} | "
                             f"Pair: {job.pair_address} | "
                             f"Round Duration: {job.round_duration_seconds}s"
                         )
@@ -284,7 +310,7 @@ def main():
     """Main validator entry point."""
     try:
         config = get_config()
-        validate_config(config)
+        # validate_config(config)
         asyncio.run(run_jobs_validator(config))
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)

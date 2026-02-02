@@ -3,7 +3,6 @@ Execute strategy on-chain via executor bot HTTP API.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, Dict, List
 
@@ -122,8 +121,8 @@ async def execute_strategy_onchain(
         try:
             if response.text:
                 err_msg += f": {response.text}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to read response.text: {str(e)}")
         logger.error(
             f"Executor bot execution failed: {err_msg} "
             f"(round={round_obj.round_id}, miner={miner_uid})"

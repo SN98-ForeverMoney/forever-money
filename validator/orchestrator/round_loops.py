@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from protocol.models import Inventory, Position
 from validator.models.job import Job, Round

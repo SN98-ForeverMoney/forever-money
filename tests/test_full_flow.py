@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from tortoise import Tortoise
 import bittensor as bt
-from protocol import Inventory, Position
+from protocol import Inventory
 from validator.models.job import Job, Prediction, Round
 from validator.repositories.job import JobRepository
 from validator.round_orchestrator import AsyncRoundOrchestrator

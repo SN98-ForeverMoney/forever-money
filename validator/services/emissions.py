@@ -250,7 +250,6 @@ class EmissionsService:
             for job in active_jobs:
                 # Get top miners for this job (sorted by combined_score)
                 miner_scores = await self.job_repository.get_eligible_miners(job.job_id)
-                
                 for miner_score in miner_scores:
                     uid = miner_score.miner_uid
                     combined_score = miner_score.combined_score

@@ -5,10 +5,8 @@ Use these across test modules. Helpers live in tests.common.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import sys
 
 import pytest
 

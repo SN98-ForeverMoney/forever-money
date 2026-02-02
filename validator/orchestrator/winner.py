@@ -6,7 +6,7 @@ One winner per job; tie-breaking by historic combined_score (eval + live).
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from validator.services.scorer import Scorer
 
