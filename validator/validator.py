@@ -37,6 +37,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
+    BT_WALLET_PATH
 )
 
 # Configure logging
@@ -100,7 +101,7 @@ def get_config():
     parser.add_argument(
         "--wallet.path",
         type=str,
-        default='/home/ubuntu/forevermoney/wallets',
+        default=BT_WALLET_PATH,
         help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)",
     )
 
@@ -310,7 +311,7 @@ def main():
     """Main validator entry point."""
     try:
         config = get_config()
-        # validate_config(config)
+        validate_config(config)
         asyncio.run(run_jobs_validator(config))
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)

@@ -116,7 +116,6 @@ class PriceService:
         raw = (token_address or "").strip()
         if not raw:
             logger.warning("get_token_price: empty token_address")
-            return 1.0
         low = raw.lower()
         addr = low if low.startswith("0x") else "0x" + low
 
@@ -134,23 +133,19 @@ class PriceService:
                         logger.warning(
                             f"Response returned {response.status} for {token_address} on {platform}"
                         )
-                        return 1.0
                     data = await response.json()
         except asyncio.TimeoutError:
             logger.warning(
                 f"Timeout fetching token price for {token_address} (chain_id={chain_id})"
             )
-            return 1.0
         except Exception as e:
             logger.error(f"Failed to fetch token price for {token_address}: {e}")
-            return 1.0
 
         prices = data.get("prices") or []
         if not prices:
             logger.warning(
                 f"Response returned no prices for {token_address} on {platform}"
             )
-            return 1.0
 
         # prices = [[timestamp_ms, price], ...]; use latest (last) price
         prices.sort(key=lambda p: p[0])

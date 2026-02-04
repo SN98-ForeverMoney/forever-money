@@ -6,7 +6,6 @@ CollectEvent data from the pool events database.
 """
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from validator.repositories.job import JobRepository
@@ -16,11 +15,42 @@ from validator.utils.web3 import AsyncWeb3Helper
 
 logger = logging.getLogger(__name__)
 
+# Approximate blocks per day by chain (for lookback_days -> block range conversion)
+# Chain IDs: 1=Ethereum, 8453=Base, 137=Polygon, 42161=Arbitrum, 10=Optimism, etc.
+CHAIN_BLOCKS_PER_DAY: Dict[int, int] = {
+    1: 7200,       # Ethereum ~12s/block
+    8453: 43200,   # Base ~2s/block
+    137: 43200,    # Polygon ~2s/block
+    42161: 172800, # Arbitrum ~0.5s/block
+    10: 43200,     # Optimism ~2s/block
+    43114: 28800,  # Avalanche ~3s/block
+    56: 28800,     # BSC ~3s/block
+}
+DEFAULT_BLOCKS_PER_DAY = 43200  # fallback for unknown chains
+
 
 def _normalize_address(addr: str) -> str:
     """Return lowercase address with 0x prefix."""
     s = (addr or "").strip().lower()
     return s if s.startswith("0x") else "0x" + s
+
+
+async def _get_block_range_for_lookback(
+    chain_id: int, lookback_days: int
+) -> Tuple[int, int]:
+    """
+    Get (start_block, end_block) for a lookback period.
+
+    Uses current block from chain and approximate blocks per day.
+    """
+    w3 = AsyncWeb3Helper.make_web3(chain_id)
+    end_block = await w3.web3.eth.block_number
+    blocks_per_day = CHAIN_BLOCKS_PER_DAY.get(
+        chain_id, DEFAULT_BLOCKS_PER_DAY
+    )
+    blocks_in_period = lookback_days * blocks_per_day
+    start_block = max(0, end_block - blocks_in_period)
+    return start_block, end_block
 
 
 async def _resolve_pool_tokens(
@@ -82,8 +112,11 @@ class RevenueService:
             return 0.0
 
         vault_addresses = [j.sn_liquidity_manager_address for j in active_jobs]
-        start_block = 0
-        end_block = 999999999
+        # Use chain from first job; pool_events DB typically indexes one chain
+        chain_id = active_jobs[0].chain_id
+        start_block, end_block = await _get_block_range_for_lookback(
+            chain_id, lookback_days
+        )
 
         try:
             vault_fees = await self.pool_data_db.get_miner_vault_fees(

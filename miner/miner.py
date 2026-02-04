@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 
 from protocol.synapses import RebalanceQuery
+from protocol.models import Position
 from validator.utils.env import MINER_VERSION, NETUID, SUBTENSOR_NETWORK
 from validator.utils.math import UniswapV3Math
 
