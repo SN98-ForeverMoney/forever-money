@@ -2,6 +2,7 @@ import aiohttp
 import logging
 from typing import Dict
 import bittensor as bt
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +47,10 @@ class PriceService:
                         return float(tao_price)
                     else:
                         logger.warning(f"Coingecko API returned status {response.status}")
-                        return 1.0
         except asyncio.TimeoutError:
             logger.warning("Timeout fetching TAO price from Coingecko")
-            return 1.0
         except Exception as e:
             logger.error(f"Failed to fetch TAO price: {e}")
-            return 1.0
 
     @staticmethod
     async def get_alpha_price_tao(subtensor: bt.Subtensor, netuid: int) -> float:
@@ -97,30 +95,28 @@ class PriceService:
         """
         Get current token price in USD from CoinGecko.
 
-        Args:
-            token_address: Token contract address (with or without 0x).
-            chain_id: Chain ID (e.g. 8453 for Base). Must map to a CoinGecko
-                asset platform (ethereum, base, polygon-pos, etc.).
+        Raises:
+            ValueError: On invalid args (unknown chain_id, empty token_address).
+            RuntimeError: On fetch failure (timeout, HTTP error, no prices).
+            Exception: Re-raised from underlying errors.
 
         Returns:
-            Token price in USD, or 1.0 on error / unknown platform.
+            Token price in USD.
         """
         platform = PriceService.CHAIN_ID_TO_PLATFORM.get(chain_id)
         if not platform:
-            logger.warning(
-                f"get_token_price: chain_id={chain_id} not in CHAIN_ID_TO_PLATFORM, "
-                "using 1.0"
+            raise ValueError(
+                f"chain_id={chain_id} not in CHAIN_ID_TO_PLATFORM"
             )
-            return 1.0
 
         raw = (token_address or "").strip()
         if not raw:
-            logger.warning("get_token_price: empty token_address")
+            raise ValueError("empty token_address")
         low = raw.lower()
         addr = low if low.startswith("0x") else "0x" + low
 
         url = (
-            f"{PriceService.BASE_URL}/coins/{platform}/contract/{addr}/market_chart"
+            f"{PriceService.BASE_URL}/coins/{platform}/contract/{addr}/market_char"
         )
         params = {"vs_currency": "usd", "days": "1"}
 
@@ -130,21 +126,29 @@ class PriceService:
                     url, params=params, timeout=aiohttp.ClientTimeout(total=15)
                 ) as response:
                     if response.status != 200:
-                        logger.warning(
-                            f"Response returned {response.status} for {token_address} on {platform}"
+                        raise RuntimeError(
+                            f"CoinGecko returned status {response.status} "
+                            f"for {token_address} on {platform}"
                         )
                     data = await response.json()
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logger.warning(
                 f"Timeout fetching token price for {token_address} (chain_id={chain_id})"
             )
+            raise RuntimeError(
+                f"Timeout fetching token price for {token_address} "
+                f"(chain_id={chain_id})"
+            ) from e
+        except (ValueError, RuntimeError):
+            raise
         except Exception as e:
             logger.error(f"Failed to fetch token price for {token_address}: {e}")
+            raise
 
         prices = data.get("prices") or []
         if not prices:
-            logger.warning(
-                f"Response returned no prices for {token_address} on {platform}"
+            raise RuntimeError(
+                f"No prices returned for {token_address} on {platform}"
             )
 
         # prices = [[timestamp_ms, price], ...]; use latest (last) price

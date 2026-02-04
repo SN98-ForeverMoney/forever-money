@@ -257,7 +257,7 @@ async def run_jobs_validator(config):
 
                 # Log status
                 logger.info(
-                    f"Currently running {len(running_jobs)} jobs: {list(running_jobs.keys())}"
+                    f"Currently running {len(running_jobs)} job(s): {list(running_jobs.keys())}"
                 )
 
                 await asyncio.sleep(check_interval)

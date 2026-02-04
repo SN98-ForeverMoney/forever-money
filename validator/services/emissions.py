@@ -45,7 +45,6 @@ class EmissionsService:
         """
         if not self.revenue_service:
             logger.warning("RevenueService not available, returning 0 revenue")
-            return 0.0
 
         try:
             revenue = await self.revenue_service.get_total_vault_revenue_usd(
@@ -54,7 +53,7 @@ class EmissionsService:
             return revenue
         except Exception as e:
             logger.error(f"Failed to get vault revenue: {e}")
-            return 0.0
+            raise
 
     async def calculate_emissions_split(self) -> Tuple[float, float]:
         """
@@ -74,61 +73,71 @@ class EmissionsService:
         Returns:
             (burn_ratio, miner_ratio)
             e.g., (0.1, 0.9) means 10% burn, 90% to miners.
+
+        Raises:
+            Exception: Re-raised on any failure (e.g. price fetch, revenue fetch).
+                Caller should skip setting weights.
         """
-        revenue_usd = await self.get_vault_revenue_usd()
-        alpha_price_usd = await PriceService.get_alpha_price_usd(
-            self.subtensor, NETUID
-        )
+        try:
+            revenue_usd = await self.get_vault_revenue_usd()
+            alpha_price_usd = await PriceService.get_alpha_price_usd(
+                self.subtensor, NETUID
+            )
 
-        # Total subnet emissions per epoch (in Alpha)
-        total_emission_rao = sum(self.metagraph.emission)
-        total_emission_alpha = float(total_emission_rao) / 1e9
+            # Total subnet emissions per epoch (in Alpha)
+            total_emission_rao = sum(self.metagraph.emission)
+            total_emission_alpha = float(total_emission_rao) / 1e9
 
-        if total_emission_alpha <= 0:
-            logger.warning("Total emissions are 0, defaulting to 100% burn")
-            return 1.0, 0.0
+            if total_emission_alpha <= 0:
+                logger.warning("Total emissions are 0, defaulting to 100% burn")
+                return 1.0, 0.0
 
-        if revenue_usd <= 0:
+            if revenue_usd <= 0:
+                logger.info(
+                    "Unprofitable (revenue=%.2f): 100%% burn to UID 0",
+                    revenue_usd,
+                )
+                return 1.0, 0.0
+
+            if alpha_price_usd <= 0:
+                logger.warning(
+                    "Alpha price is 0 or invalid, defaulting to 0%% burn"
+                )
+                return 0.0, 1.0
+
+            revenue_alpha = revenue_usd / alpha_price_usd
+
+            # Miner share grows with revenue, capped at profit_ratio. Rest is burn.
+            miner_ratio = min(
+                self.profit_ratio,
+                revenue_alpha / total_emission_alpha,
+            )
+            miner_ratio = max(0.0, miner_ratio)
+            burn_ratio = 1.0 - miner_ratio
+
+            miner_emissions_alpha = total_emission_alpha * miner_ratio
+            burn_alpha = total_emission_alpha * burn_ratio
+
             logger.info(
-                "Unprofitable (revenue=%.2f): 100%% burn to UID 0",
+                "Emissions split: profit_ratio=%.2f "
+                "revenue_usd=%.2f alpha_price=%.4f revenue_alpha=%.4f total=%.4f "
+                "miner_ratio=%.4f burn_ratio=%.4f miner_alpha=%.4f burn_alpha=%.4f",
+                self.profit_ratio,
                 revenue_usd,
+                alpha_price_usd,
+                revenue_alpha,
+                total_emission_alpha,
+                miner_ratio,
+                burn_ratio,
+                miner_emissions_alpha,
+                burn_alpha,
             )
-            return 1.0, 0.0
-
-        if alpha_price_usd <= 0:
-            logger.warning(
-                "Alpha price is 0 or invalid, defaulting to 0%% burn"
+            return burn_ratio, miner_ratio
+        except Exception as e:
+            logger.error(
+                f"calculate_emissions_split failed: {e}. Skipping weight setting."
             )
-            return 0.0, 1.0
-
-        revenue_alpha = revenue_usd / alpha_price_usd
-
-        # Miner share grows with revenue, capped at profit_ratio. Rest is burn.
-        miner_ratio = min(
-            self.profit_ratio,
-            revenue_alpha / total_emission_alpha,
-        )
-        miner_ratio = max(0.0, miner_ratio)
-        burn_ratio = 1.0 - miner_ratio
-
-        miner_emissions_alpha = total_emission_alpha * miner_ratio
-        burn_alpha = total_emission_alpha * burn_ratio
-
-        logger.info(
-            "Emissions split (revenue↑→miners↑): profit_ratio=%.2f "
-            "revenue_usd=%.2f alpha_price=%.4f revenue_alpha=%.4f total=%.4f "
-            "miner_ratio=%.4f burn_ratio=%.4f miner_alpha=%.4f burn_alpha=%.4f",
-            self.profit_ratio,
-            revenue_usd,
-            alpha_price_usd,
-            revenue_alpha,
-            total_emission_alpha,
-            miner_ratio,
-            burn_ratio,
-            miner_emissions_alpha,
-            burn_alpha,
-        )
-        return burn_ratio, miner_ratio
+            raise
 
     async def calculate_weights(self, miner_scores: Dict[int, float]) -> Tuple[List[int], List[float]]:
         """
@@ -284,15 +293,21 @@ class EmissionsService:
         
         # 1. Get aggregate scores
         miner_scores = await self.get_miner_aggregate_scores()
-        
+
         # Even if no miner scores, we still want to set burn weights
         if not miner_scores:
             logger.warning("No miner scores found, will set 100% burn to UID 0")
             miner_scores = {}
-            
-        # 2. Calculate weights
-        uids, weights = await self.calculate_weights(miner_scores)
-        
+
+        # 2. Calculate weights (may raise on price/revenue fetch failure)
+        try:
+            uids, weights = await self.calculate_weights(miner_scores)
+        except Exception as e:
+            logger.warning(
+                f"Skipping weight setting: emissions calculation failed ({e})"
+            )
+            return
+
         # Filter to only non-zero weights for logging (Bittensor accepts all UIDs)
         non_zero_weights = [
             (uid, weight) for uid, weight in zip(uids, weights) if weight > 0
