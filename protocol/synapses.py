@@ -69,6 +69,9 @@ class RebalanceQuery(bt.Synapse):
     rebalances_so_far: int = Field(
         0, description="Number of rebalances executed so far"
     )
+    tick_spacing: int = Field(
+        200, description="Pool tick spacing from get_tick_spacing (for tick alignment)"
+    )
 
     # Response fields (outputs from miner)
     accepted: bool = Field(True, description="Whether miner accepts this job")

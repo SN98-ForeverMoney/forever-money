@@ -115,9 +115,9 @@ class SN98Miner:
 
         if should_rebalance:
             # Create new position centered on current tick
-            width = 2000 # Configurable width
-            tick_spacing = 200
-            
+            width = 2000  # Configurable width
+            tick_spacing = synapse.tick_spacing  # From validator via liq_manager.get_tick_spacing()
+
             # Snap to tick spacing (ticks must be multiples of spacing)
             center_tick = (current_tick // tick_spacing) * tick_spacing
             lower_tick = (center_tick - width) // tick_spacing * tick_spacing

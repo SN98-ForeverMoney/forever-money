@@ -124,6 +124,7 @@ async def run_with_miner_for_evaluation(
     rebalances_so_far = 0
     current_block = start_block
     rtype = _round_type_str(round_)
+    tick_spacing = await liq_manager.get_tick_spacing()
 
     while round_.round_deadline >= datetime.now(timezone.utc):
         if (current_block - start_block) % rebalance_check_interval == 0:
@@ -144,6 +145,7 @@ async def run_with_miner_for_evaluation(
                 current_positions=current_positions,
                 inventory=current_inventory,
                 rebalances_so_far=rebalances_so_far,
+                tick_spacing=tick_spacing,
             )
             total_query_time_ms += int((time.time() - t0) * 1000)
 
@@ -285,6 +287,7 @@ async def run_with_miner_for_live(
     execution_results: List[Dict] = []
     current_block = start_block
     rtype = _round_type_str(round_)
+    tick_spacing = await liq_manager.get_tick_spacing()
 
     while round_.round_deadline >= datetime.now(timezone.utc):
         if (current_block - start_block) % rebalance_check_interval == 0:
@@ -304,6 +307,7 @@ async def run_with_miner_for_live(
                 current_positions=current_positions,
                 inventory=current_inventory,
                 rebalances_so_far=rebalances_so_far,
+                tick_spacing=tick_spacing,
             )
             total_query_time_ms += int((time.time() - t0) * 1000)
 

@@ -27,6 +27,7 @@ async def query_miner_for_rebalance(
     current_positions: List[Position],
     inventory: Inventory,
     rebalances_so_far: int,
+    tick_spacing: int = 200,
     timeout: int = 5,
 ) -> Optional[RebalanceQuery]:
     """
@@ -46,6 +47,7 @@ async def query_miner_for_rebalance(
         current_positions=current_positions,
         inventory_remaining={"amount0": inventory.amount0, "amount1": inventory.amount1},
         rebalances_so_far=rebalances_so_far,
+        tick_spacing=tick_spacing,
     )
     try:
         responses = await dendrite(

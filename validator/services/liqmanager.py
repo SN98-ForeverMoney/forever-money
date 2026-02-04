@@ -185,6 +185,10 @@ class SnLiqManagerService:
         slot0 = await self.pool.functions.slot0().call()
         return slot0[0]
 
+    async def get_tick_spacing(self) -> int:
+        """Get the tick spacing of the pool."""
+        return await self.pool.functions.tickSpacing().call()
+
     async def get_current_positions(self) -> List[Position]:
         # 1. Create pool contract to get tokens
         token0, token1 = await asyncio.gather(
