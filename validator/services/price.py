@@ -68,7 +68,6 @@ class PriceService:
             return float(alpha_price_tao)
         except Exception as e:
             logger.error(f"Failed to fetch Alpha price (TAO): {e}")
-            return 1.0
 
     @staticmethod
     async def get_alpha_price_usd(subtensor: bt.Subtensor, netuid: int) -> float:
@@ -88,7 +87,6 @@ class PriceService:
             return alpha_price_usd
         except Exception as e:
             logger.error(f"Failed to fetch Alpha price (USD): {e}")
-            return 1.0
 
     @staticmethod
     async def get_token_price(token_address: str, chain_id: int = 8453) -> float:
@@ -116,7 +114,7 @@ class PriceService:
         addr = low if low.startswith("0x") else "0x" + low
 
         url = (
-            f"{PriceService.BASE_URL}/coins/{platform}/contract/{addr}/market_char"
+            f"{PriceService.BASE_URL}/coins/{platform}/contract/{addr}/market_chart"
         )
         params = {"vs_currency": "usd", "days": "1"}
 

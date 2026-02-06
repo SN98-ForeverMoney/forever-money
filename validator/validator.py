@@ -109,13 +109,13 @@ def get_config():
     parser.add_argument(
         "--subtensor.network",
         type=str,
-        default=None,
+        default=SUBTENSOR_NETWORK,
         help=f"Subtensor network endpoint (e.g., ws://127.0.0.1:9944, wss://entrypoint-finney.opentensor.ai:443, or finney/test/local). Default: {SUBTENSOR_NETWORK}",
     )
     parser.add_argument(
         "--netuid",
         type=int,
-        default=None,
+        default=NETUID,
         help=f"Network UID. Default: {NETUID}",
     )
 
@@ -163,6 +163,15 @@ async def run_jobs_validator(config):
     metagraph = subtensor.metagraph(netuid=config["netuid"])
     dendrite = bt.Dendrite(wallet=wallet)
 
+    # Find validator's own UID (exclude from miner queries to avoid self-query)
+    my_hotkey = wallet.hotkey.ss58_address
+    my_uid = None
+    for uid in range(len(metagraph.hotkeys)):
+        if metagraph.hotkeys[uid] == my_hotkey:
+            my_uid = uid
+            break
+    config["my_uid"] = my_uid
+
     logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
     logger.info(f"Network: {config['subtensor_network']}")
     logger.info(f"Netuid: {config['netuid']}")
@@ -200,6 +209,7 @@ async def run_jobs_validator(config):
         metagraph=metagraph,
         subtensor=subtensor,
         job_repository=job_repository,
+        netuid=config["netuid"],
         revenue_service=revenue_service,
     )
     logger.info("Emissions service initialized")
@@ -276,7 +286,7 @@ async def run_jobs_validator(config):
                 await emissions_service.set_weights_on_chain(wallet, config["netuid"])
                 await asyncio.sleep(weight_set_interval)
             except Exception as e:
-                logger.error(f"Error in weight setter: {e}", exc_info=True)
+                logger.error(f"Error in weight setter: {e}")
                 await asyncio.sleep(60)
 
     try:

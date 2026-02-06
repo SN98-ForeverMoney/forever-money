@@ -117,9 +117,7 @@ async def run_with_miner_for_evaluation(
 
     current_positions = list(initial_positions)
     current_inventory = initial_inventory
-    rebalance_history: List[Dict] = [
-        {"block": start_block - 1, "new_positions": initial_positions, "inventory": initial_inventory}
-    ]
+    rebalance_history: List[Dict] = []
     total_query_time_ms = 0
     rebalances_so_far = 0
     current_block = start_block
@@ -188,9 +186,9 @@ async def run_with_miner_for_evaluation(
                         _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
                             pos.tick_lower,
                             pos.tick_upper,
+                            rebalance_price,
                             int(pos.allocation0),
                             int(pos.allocation1),
-                            rebalance_price,
                         )
                         total_a0 += a0
                         total_a1 += a1
@@ -230,9 +228,17 @@ async def run_with_miner_for_evaluation(
         initial_inventory,
         job.fee_rate,
     )
+    iv = performance_metrics.get("initial_value")
+    fv = performance_metrics.get("final_value")
+    return_pct = (
+        (float(fv) - float(iv)) / float(iv) * 100
+        if iv is not None and fv is not None and float(iv) > 0
+        else None
+    )
+    return_str = f", return: {return_pct:.2f}%" if return_pct is not None else ""
     logger.info(
-        f"Backtest complete for miner {miner_uid}: {len(rebalance_history)} rebalances, "
-        f"PnL: {performance_metrics.get('pnl', 0):.4f}"
+        f"Backtest complete for miner {miner_uid}: {len(rebalance_history)} rebalances"
+        f", initial_value={iv}, final_value={fv}{return_str}"
     )
     miner_score_val = await Scorer.score_pol_strategy(metrics=performance_metrics)
     # Score/participation updates happen in run_evaluation_round after winner selection
@@ -278,9 +284,7 @@ async def run_with_miner_for_live(
     """
     current_positions = list(initial_positions)
     current_inventory = initial_inventory
-    rebalance_history: List[Dict] = [
-        {"block": start_block - 1, "new_positions": initial_positions, "inventory": initial_inventory}
-    ]
+    rebalance_history: List[Dict] = []
     total_query_time_ms = 0
     rebalances_so_far = 0
     execution_failures = 0
@@ -343,9 +347,11 @@ async def run_with_miner_for_live(
                         total_a0, total_a1 = 0, 0
                         for pos in response.desired_positions:
                             _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
-                                pos.tick_lower, pos.tick_upper,
-                                int(pos.allocation0), int(pos.allocation1),
+                                pos.tick_lower,
+                                pos.tick_upper,
                                 rebalance_price,
+                                int(pos.allocation0),
+                                int(pos.allocation1),
                             )
                             total_a0 += a0
                             total_a1 += a1

@@ -107,8 +107,11 @@ class AsyncRoundOrchestrator:
             job.sn_liquidity_manager_address,
             job.pair_address,
         )
+        my_uid = self.config.get("my_uid")
         active_uids = [
-            uid for uid in range(len(self.metagraph.S)) if self.metagraph.S[uid] > 0
+            uid
+            for uid in range(len(self.metagraph.S))
+            if my_uid is None or uid != my_uid
         ]
         if not active_uids:
             logger.warning("No active miners found.")
@@ -116,10 +119,6 @@ class AsyncRoundOrchestrator:
 
         self.round_numbers[job.job_id]["evaluation"] += 1
         round_number = self.round_numbers[job.job_id]["evaluation"]
-        logger.info("=" * 60)
-        logger.info(f"Starting EVALUATION round #{round_number} for job {job.job_id}")
-        logger.info("=" * 60)
-
         current_block = await self._get_latest_block(job.chain_id)
         round_obj = await self.job_repository.create_round(
             job=job,
@@ -127,6 +126,11 @@ class AsyncRoundOrchestrator:
             round_number=round_number,
             start_block=current_block,
         )
+        self.round_numbers[job.job_id]["evaluation"] = round_obj.round_number
+        round_number = round_obj.round_number
+        logger.info("=" * 60)
+        logger.info(f"Starting EVALUATION round #{round_number} for job {job.job_id}")
+        logger.info("=" * 60)
         inventory = await liq_manager.get_inventory()
         initial_positions = await liq_manager.get_current_positions()
         logger.info(f"Loaded {len(initial_positions)} initial positions from on-chain")
@@ -185,10 +189,6 @@ class AsyncRoundOrchestrator:
             logger.info(f"Miner {winner_uid} not eligible for live round yet")
             return
 
-        logger.info("=" * 60)
-        logger.info(f"Starting LIVE round for job {job.job_id} with Miner {winner_uid}")
-        logger.info("=" * 60)
-
         self.round_numbers[job.job_id]["live"] += 1
         round_number = self.round_numbers[job.job_id]["live"]
         current_block = await self._get_latest_block(job.chain_id)
@@ -198,6 +198,13 @@ class AsyncRoundOrchestrator:
             round_number=round_number,
             start_block=current_block,
         )
+        self.round_numbers[job.job_id]["live"] = round_obj.round_number
+        round_number = round_obj.round_number
+        logger.info("=" * 60)
+        logger.info(
+            f"Starting LIVE round #{round_number} for job {job.job_id} with Miner {winner_uid}"
+        )
+        logger.info("=" * 60)
         liq_manager = SnLiqManagerService(
             job.chain_id,
             job.sn_liquidity_manager_address,

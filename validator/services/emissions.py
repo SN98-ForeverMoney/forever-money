@@ -8,7 +8,7 @@ from validator.services.price import PriceService
 from validator.services.revenue import RevenueService
 from validator.models.job import Job, MinerScore
 from validator.repositories.job import JobRepository
-from validator.utils.env import NETUID, PROFIT_RATIO
+from validator.utils.env import PROFIT_RATIO
 
 
 logger = logging.getLogger(__name__)
@@ -22,12 +22,14 @@ class EmissionsService:
         metagraph: bt.Metagraph,
         subtensor: bt.Subtensor,
         job_repository: JobRepository,
+        netuid: int,
         revenue_service: Optional[RevenueService] = None,
         profit_ratio: Optional[float] = None,
     ):
         self.metagraph = metagraph
         self.subtensor = subtensor
         self.job_repository = job_repository
+        self.netuid = netuid
         self.revenue_service = revenue_service
         self.profit_ratio = (
             profit_ratio
@@ -81,12 +83,11 @@ class EmissionsService:
         try:
             revenue_usd = await self.get_vault_revenue_usd()
             alpha_price_usd = await PriceService.get_alpha_price_usd(
-                self.subtensor, NETUID
+                self.subtensor, self.netuid
             )
 
             # Total subnet emissions per epoch (in Alpha)
-            total_emission_rao = sum(self.metagraph.emission)
-            total_emission_alpha = float(total_emission_rao) / 1e9
+            total_emission_alpha = float(sum(self.metagraph.emission))
 
             if total_emission_alpha <= 0:
                 logger.warning("Total emissions are 0, defaulting to 100% burn")
@@ -306,7 +307,7 @@ class EmissionsService:
             logger.warning(
                 f"Skipping weight setting: emissions calculation failed ({e})"
             )
-            return
+            raise
 
         # Filter to only non-zero weights for logging (Bittensor accepts all UIDs)
         non_zero_weights = [

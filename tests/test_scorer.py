@@ -2,6 +2,8 @@ import pytest
 from validator.services.scorer import Scorer
 from dataclasses import dataclass
 
+SCORE_MIN = -100.0
+
 @dataclass
 class MockInventory:
     amount0: str
@@ -31,7 +33,7 @@ async def test_scorer_zero_initial_value():
     }
     
     score = await Scorer.score_pol_strategy(metrics)
-    assert score == float("-inf")
+    assert score == SCORE_MIN
 
 @pytest.mark.asyncio
 async def test_scorer_negative_value_gain():
@@ -106,7 +108,7 @@ async def test_scorer_massive_loss():
         "final_inventory": MockInventory("0", "0"),
     }
     score = await Scorer.score_pol_strategy(metrics)
-    assert score < -1000
+    assert score == SCORE_MIN  # Clamped to SCORE_MIN (-100)
 
 
 @pytest.mark.asyncio
