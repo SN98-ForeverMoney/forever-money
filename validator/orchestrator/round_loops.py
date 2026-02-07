@@ -167,55 +167,68 @@ async def run_with_miner_for_evaluation(
                     "performance_metrics": {},
                     "total_query_time_ms": total_query_time_ms,
                 }
-            if response.desired_positions is not None:
-                if _positions_within_tolerance(
-                    current_positions, response.desired_positions
-                ):
-                    logger.debug(
-                        f"Positions within {REBALANCE_TOLERANCE*100:.0f}% tolerance, "
-                        f"skipping rebalance at block {current_block}"
+            if response.desired_positions is None:
+                logger.info(
+                    f"Miner {miner_uid} returned no desired_positions (likely not running), "
+                    "score=0"
+                )
+                return {
+                    "accepted": False,
+                    "refusal_reason": "No desired positions (miner not running)",
+                    "rebalance_history": rebalance_history,
+                    "final_positions": current_positions,
+                    "performance_metrics": {},
+                    "score": 0.0,
+                    "total_query_time_ms": total_query_time_ms,
+                }
+            if _positions_within_tolerance(
+                current_positions, response.desired_positions
+            ):
+                logger.debug(
+                    f"Positions within {REBALANCE_TOLERANCE*100:.0f}% tolerance, "
+                    f"skipping rebalance at block {current_block}"
+                )
+            else:
+                logger.debug(
+                    f"Miner {miner_uid} rebalancing at block {current_block}: "
+                    f"{len(response.desired_positions)} positions"
+                )
+                rebalance_price = await liq_manager.get_current_price()
+                total_a0, total_a1 = 0, 0
+                for pos in response.desired_positions:
+                    _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
+                        pos.tick_lower,
+                        pos.tick_upper,
+                        rebalance_price,
+                        int(pos.allocation0),
+                        int(pos.allocation1),
                     )
-                else:
-                    logger.debug(
-                        f"Miner {miner_uid} rebalancing at block {current_block}: "
-                        f"{len(response.desired_positions)} positions"
-                    )
-                    rebalance_price = await liq_manager.get_current_price()
-                    total_a0, total_a1 = 0, 0
-                    for pos in response.desired_positions:
-                        _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
-                            pos.tick_lower,
-                            pos.tick_upper,
-                            rebalance_price,
-                            int(pos.allocation0),
-                            int(pos.allocation1),
-                        )
-                        total_a0 += a0
-                        total_a1 += a1
-                    amount_0_int = int(initial_inventory.amount0) - total_a0
-                    amount_1_int = int(initial_inventory.amount1) - total_a1
-                    if amount_0_int < 0 or amount_1_int < 0:
-                        return {
-                            "accepted": False,
-                            "refusal_reason": None,
-                            "rebalance_history": rebalance_history,
-                            "final_positions": current_positions,
-                            "performance_metrics": {},
-                            "total_query_time_ms": total_query_time_ms,
-                        }
-                    current_inventory = Inventory(
-                        amount0=str(amount_0_int), amount1=str(amount_1_int)
-                    )
-                    rebalance_history.append({
-                        "block": current_block,
-                        "price": rebalance_price,
-                        "price_in_query": price_at_query,
-                        "old_positions": current_positions,
-                        "new_positions": response.desired_positions,
-                        "inventory": current_inventory,
-                    })
-                    current_positions = response.desired_positions
-                    rebalances_so_far += 1
+                    total_a0 += a0
+                    total_a1 += a1
+                amount_0_int = int(initial_inventory.amount0) - total_a0
+                amount_1_int = int(initial_inventory.amount1) - total_a1
+                if amount_0_int < 0 or amount_1_int < 0:
+                    return {
+                        "accepted": False,
+                        "refusal_reason": None,
+                        "rebalance_history": rebalance_history,
+                        "final_positions": current_positions,
+                        "performance_metrics": {},
+                        "total_query_time_ms": total_query_time_ms,
+                    }
+                current_inventory = Inventory(
+                    amount0=str(amount_0_int), amount1=str(amount_1_int)
+                )
+                rebalance_history.append({
+                    "block": current_block,
+                    "price": rebalance_price,
+                    "price_in_query": price_at_query,
+                    "old_positions": current_positions,
+                    "new_positions": response.desired_positions,
+                    "inventory": current_inventory,
+                })
+                current_positions = response.desired_positions
+                rebalances_so_far += 1
         else:
             await asyncio.sleep(1)
         current_block = await get_block_fn(job.chain_id)

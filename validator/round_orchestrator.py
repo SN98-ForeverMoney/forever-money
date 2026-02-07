@@ -179,14 +179,28 @@ class AsyncRoundOrchestrator:
         return await select_winner(self.job_repository, job_id, scores)
 
     async def run_live_round(self, job: Job) -> None:
-        """Run a live round with the previous evaluation winner."""
-        winner_uid = await self.job_repository.get_previous_winner(job.job_id)
-        if winner_uid is None:
-            logger.info(f"No previous winner for job {job.job_id}, skipping live round")
+        """Run a live round with the first eligible miner from evaluation ranking."""
+        ranking = await self.job_repository.get_evaluation_round_ranking(
+            job.job_id
+        )
+        if not ranking:
+            logger.info(
+                f"No evaluation ranking for job {job.job_id}, skipping live round"
+            )
             return
-        eligible = await self.job_repository.get_eligible_miners(job.job_id)
-        if not any(s.miner_uid == winner_uid for s in eligible):
-            logger.info(f"Miner {winner_uid} not eligible for live round yet")
+        eligible_uids = {
+            s.miner_uid
+            for s in await self.job_repository.get_eligible_miners(job.job_id)
+        }
+        winner_uid = None
+        for uid in ranking:
+            if uid in eligible_uids:
+                winner_uid = uid
+                break
+        if winner_uid is None:
+            logger.info(
+                f"No eligible miners for live round (tried: {ranking}), skipping"
+            )
             return
 
         self.round_numbers[job.job_id]["live"] += 1
@@ -246,6 +260,7 @@ class AsyncRoundOrchestrator:
                         f"Miner {winner_uid} had {execution_failures}/{total_executions} "
                         f"execution failures in live round {round_number}. Score may be inaccurate."
                     )
+                logger.info(f"Miner {winner_uid} live score: {live_score}")
                 await self.job_repository.update_miner_score(
                     job_id=job.job_id,
                     miner_uid=winner_uid,

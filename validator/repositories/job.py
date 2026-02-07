@@ -22,6 +22,7 @@ from validator.models.job import (
     RoundType,
     RoundStatus,
 )
+from validator.services.scorer import Scorer
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +413,41 @@ class JobRepository:
         )
 
         return round_obj.winner_uid if round_obj else None
+
+    async def get_evaluation_round_ranking(self, job_id: str) -> List[int]:
+        """
+        Get the ranking of miners from the last completed evaluation round.
+        Uses round scores and historic combined_score for tie-breaking
+        (same logic as select_winner).
+
+        Returns:
+            List of miner UIDs in order (best first), or empty list if no round.
+        """
+        job = await Job.get(job_id=job_id)
+        round_obj = (
+            await Round.filter(
+                job=job,
+                round_type=RoundType.EVALUATION,
+                status=RoundStatus.COMPLETED,
+            )
+            .order_by("-round_number")
+            .first()
+        )
+        if not round_obj or not round_obj.performance_data:
+            return []
+        scores_data = round_obj.performance_data.get("scores") or {}
+        if not scores_data:
+            return []
+        round_scores = {
+            int(uid): float(score) for uid, score in scores_data.items()
+        }
+        historic = await self.get_historic_combined_scores(
+            job_id, list(round_scores.keys())
+        )
+        ranked = Scorer.rank_miners_by_score_and_history(
+            round_scores, historic
+        )
+        return [uid for uid, _ in ranked]
 
     async def get_top_miners_by_job(self) -> Dict[str, int]:
         """

@@ -213,6 +213,7 @@ class TestLiveFlow(unittest.IsolatedAsyncioTestCase):
             start_block=90
         )
         eval_round.winner_uid = 0
+        eval_round.performance_data = {"scores": {"0": 0.8}}
         await eval_round.save()
         
         # Create MinerScore with < 7 days participation (not eligible)
