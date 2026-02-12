@@ -8,7 +8,7 @@ from validator.services.price import PriceService
 from validator.services.revenue import RevenueService
 from validator.models.job import Job, MinerScore
 from validator.repositories.job import JobRepository
-from validator.utils.env import NETUID, PROFIT_RATIO
+from validator.utils.env import PROFIT_RATIO
 
 
 logger = logging.getLogger(__name__)
@@ -22,12 +22,14 @@ class EmissionsService:
         metagraph: bt.Metagraph,
         subtensor: bt.Subtensor,
         job_repository: JobRepository,
+        netuid: int,
         revenue_service: Optional[RevenueService] = None,
         profit_ratio: Optional[float] = None,
     ):
         self.metagraph = metagraph
         self.subtensor = subtensor
         self.job_repository = job_repository
+        self.netuid = netuid
         self.revenue_service = revenue_service
         self.profit_ratio = (
             profit_ratio
@@ -45,16 +47,15 @@ class EmissionsService:
         """
         if not self.revenue_service:
             logger.warning("RevenueService not available, returning 0 revenue")
-            return 0.0
 
         try:
             revenue = await self.revenue_service.get_total_vault_revenue_usd(
-                lookback_days=30
+                lookback_days=1
             )
             return revenue
         except Exception as e:
             logger.error(f"Failed to get vault revenue: {e}")
-            return 0.0
+            raise
 
     async def calculate_emissions_split(self) -> Tuple[float, float]:
         """
@@ -74,61 +75,70 @@ class EmissionsService:
         Returns:
             (burn_ratio, miner_ratio)
             e.g., (0.1, 0.9) means 10% burn, 90% to miners.
+
+        Raises:
+            Exception: Re-raised on any failure (e.g. price fetch, revenue fetch).
+                Caller should skip setting weights.
         """
-        revenue_usd = await self.get_vault_revenue_usd()
-        alpha_price_usd = await PriceService.get_alpha_price_usd(
-            self.subtensor, NETUID
-        )
+        try:
+            revenue_usd = await self.get_vault_revenue_usd()
+            alpha_price_usd = await PriceService.get_alpha_price_usd(
+                self.subtensor, self.netuid
+            )
 
-        # Total subnet emissions per epoch (in Alpha)
-        total_emission_rao = sum(self.metagraph.emission)
-        total_emission_alpha = float(total_emission_rao) / 1e9
+            # Total subnet emissions per epoch (in Alpha)
+            total_emission_alpha = float(sum(self.metagraph.emission))
 
-        if total_emission_alpha <= 0:
-            logger.warning("Total emissions are 0, defaulting to 100% burn")
-            return 1.0, 0.0
+            if total_emission_alpha <= 0:
+                logger.warning("Total emissions are 0, defaulting to 100% burn")
+                return 1.0, 0.0
 
-        if revenue_usd <= 0:
+            if revenue_usd <= 0:
+                logger.info(
+                    "Unprofitable (revenue=%.2f): 100%% burn to UID 0",
+                    revenue_usd,
+                )
+                return 1.0, 0.0
+
+            if alpha_price_usd <= 0:
+                logger.warning(
+                    "Alpha price is 0 or invalid, defaulting to 0%% burn"
+                )
+                return 0.0, 1.0
+
+            revenue_alpha = revenue_usd / alpha_price_usd
+
+            # Miner share grows with revenue, capped at profit_ratio. Rest is burn.
+            miner_ratio = min(
+                self.profit_ratio,
+                revenue_alpha / total_emission_alpha,
+            )
+            miner_ratio = max(0.0, miner_ratio)
+            burn_ratio = 1.0 - miner_ratio
+
+            miner_emissions_alpha = total_emission_alpha * miner_ratio
+            burn_alpha = total_emission_alpha * burn_ratio
+
             logger.info(
-                "Unprofitable (revenue=%.2f): 100%% burn to UID 0",
+                "Emissions split: profit_ratio=%.2f "
+                "revenue_usd=%.2f alpha_price=%.4f revenue_alpha=%.4f total=%.4f "
+                "miner_ratio=%.4f burn_ratio=%.4f miner_alpha=%.4f burn_alpha=%.4f",
+                self.profit_ratio,
                 revenue_usd,
+                alpha_price_usd,
+                revenue_alpha,
+                total_emission_alpha,
+                miner_ratio,
+                burn_ratio,
+                miner_emissions_alpha,
+                burn_alpha,
             )
-            return 1.0, 0.0
-
-        if alpha_price_usd <= 0:
-            logger.warning(
-                "Alpha price is 0 or invalid, defaulting to 0%% burn"
+            return burn_ratio, miner_ratio
+        except Exception as e:
+            logger.error(
+                f"calculate_emissions_split failed: {e}. Skipping weight setting."
             )
-            return 0.0, 1.0
-
-        revenue_alpha = revenue_usd / alpha_price_usd
-
-        # Miner share grows with revenue, capped at profit_ratio. Rest is burn.
-        miner_ratio = min(
-            self.profit_ratio,
-            revenue_alpha / total_emission_alpha,
-        )
-        miner_ratio = max(0.0, miner_ratio)
-        burn_ratio = 1.0 - miner_ratio
-
-        miner_emissions_alpha = total_emission_alpha * miner_ratio
-        burn_alpha = total_emission_alpha * burn_ratio
-
-        logger.info(
-            "Emissions split (revenue↑→miners↑): profit_ratio=%.2f "
-            "revenue_usd=%.2f alpha_price=%.4f revenue_alpha=%.4f total=%.4f "
-            "miner_ratio=%.4f burn_ratio=%.4f miner_alpha=%.4f burn_alpha=%.4f",
-            self.profit_ratio,
-            revenue_usd,
-            alpha_price_usd,
-            revenue_alpha,
-            total_emission_alpha,
-            miner_ratio,
-            burn_ratio,
-            miner_emissions_alpha,
-            burn_alpha,
-        )
-        return burn_ratio, miner_ratio
+            raise
 
     async def calculate_weights(self, miner_scores: Dict[int, float]) -> Tuple[List[int], List[float]]:
         """
@@ -228,42 +238,40 @@ class EmissionsService:
 
     async def get_miner_aggregate_scores(self) -> Dict[int, float]:
         """
-        Calculate aggregate score for each miner across all jobs.
-        
-        Uses combined_score from MinerScore model, which aggregates:
-        - Performance scores from evaluation/live rounds
-        - LP alignment scores
-        
+        Calculate aggregate score for miners, using only the single top miner per job.
+
+        For each job we select only the top miner (by combined_score). A miner can
+        be top on multiple jobs; their aggregate score is the sum of their
+        combined_scores for those jobs. Only these per-job winners receive
+        non-zero weight.
+
         Returns:
-            Dict mapping miner_uid -> aggregate_score
+            Dict mapping miner_uid -> aggregate_score (only uids that are top for at least one job)
         """
         try:
-            # Get all active jobs
             active_jobs = await self.job_repository.get_active_jobs()
             if not active_jobs:
                 logger.warning("No active jobs found for miner scoring")
                 return {}
 
             scores = {}
-            
-            # Aggregate scores across all jobs
-            for job in active_jobs:
-                # Get top miners for this job (sorted by combined_score)
-                miner_scores = await self.job_repository.get_eligible_miners(job.job_id)
-                
-                for miner_score in miner_scores:
-                    uid = miner_score.miner_uid
-                    combined_score = miner_score.combined_score
+            top_miner_per_job = []
 
-                    # Aggregate: sum of combined scores across all jobs
-                    # Top miners will have higher aggregate scores
-                    scores[uid] = scores.get(uid, 0.0) + float(combined_score)
-            
-            # Log top miners
-            if scores:
-                top_miners = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
-                logger.info(f"Top 5 miners by aggregate score: {top_miners}")
-            
+            for job in active_jobs:
+                # Get eligible miners sorted by combined_score (best first)
+                miner_scores = await self.job_repository.get_eligible_miners(job.job_id)
+                if not miner_scores:
+                    continue
+                # Select only the single top miner for this job
+                top = miner_scores[0]
+                uid = top.miner_uid
+                combined_score = float(top.combined_score)
+                scores[uid] = scores.get(uid, 0.0) + combined_score
+                top_miner_per_job.append((job.job_id, uid, combined_score))
+
+            for job_id, uid, score in top_miner_per_job:
+                logger.info(f"Top miner for job {job_id}: uid={uid}, score={score}")
+
             return scores
         except Exception as e:
             logger.error(f"Failed to get miner aggregate scores: {e}")
@@ -285,15 +293,21 @@ class EmissionsService:
         
         # 1. Get aggregate scores
         miner_scores = await self.get_miner_aggregate_scores()
-        
+
         # Even if no miner scores, we still want to set burn weights
         if not miner_scores:
             logger.warning("No miner scores found, will set 100% burn to UID 0")
             miner_scores = {}
-            
-        # 2. Calculate weights
-        uids, weights = await self.calculate_weights(miner_scores)
-        
+
+        # 2. Calculate weights (may raise on price/revenue fetch failure)
+        try:
+            uids, weights = await self.calculate_weights(miner_scores)
+        except Exception as e:
+            logger.warning(
+                f"Skipping weight setting: emissions calculation failed ({e})"
+            )
+            raise
+
         # Filter to only non-zero weights for logging (Bittensor accepts all UIDs)
         non_zero_weights = [
             (uid, weight) for uid, weight in zip(uids, weights) if weight > 0

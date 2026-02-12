@@ -105,14 +105,9 @@ async def test_backtester_no_price_change():
 
 @pytest.mark.asyncio
 async def test_backtester_price_goes_up():
-    # Price goes up: Token0 -> Token1
-    # User buys Token0 (swaps Token1 for Token0)? No.
-    # Price goes UP means Token0 becomes more expensive relative to Token1?
-    # Price is Token1/Token0.
-    # If Price goes UP, 1 Token0 buys MORE Token1.
-    # So user is BUYING Token0 (injecting Token1, taking Token0).
-    # Swap: amount1 > 0, amount0 < 0.
-    
+    # Pool price is always quoted as token1 / token0
+    # Adding token1 pushes the price up → ticks move higher
+    # Adding token0 pulls the price down → ticks move lower    
     initial_price = UniswapV3Math.get_sqrt_ratio_at_tick(0)
     final_price = UniswapV3Math.get_sqrt_ratio_at_tick(100) # Price increased
     

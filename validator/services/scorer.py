@@ -18,6 +18,10 @@ from validator.models.job import Job
 DEFAULT_LOSS_PENALTY = 10.0
 DEFAULT_IN_RANGE_WEIGHT = 0.08
 
+# Bounded score range: JSON/DB-safe, no -inf. Worst = SCORE_MIN, Best ≈ SCORE_MAX.
+SCORE_MIN = -100.0
+SCORE_MAX = 10.0
+
 
 def _get_loss_ratio(metrics: Dict[str, Any]) -> float:
     """
@@ -67,11 +71,11 @@ class Scorer:
         initial_value = metrics.get("initial_value")
         final_value = metrics.get("final_value")
         if initial_value is None or final_value is None:
-            return float("-inf")
+            return SCORE_MIN
         initial_value = float(initial_value)
         final_value = float(final_value)
         if initial_value <= 0:
-            return float("-inf")
+            return SCORE_MIN
 
         return_pct = (final_value - initial_value) / initial_value
         return_pct = max(-10.0, min(10.0, return_pct))
@@ -89,8 +93,8 @@ class Scorer:
             if r is not None:
                 r = max(0.0, min(1.0, float(r)))
                 score *= (1.0 - DEFAULT_IN_RANGE_WEIGHT) + DEFAULT_IN_RANGE_WEIGHT * r
-
-        return float(score)
+        score = max(SCORE_MIN, min(SCORE_MAX, float(score)))
+        return score
 
     @staticmethod
     def rank_miners_by_score_and_history(

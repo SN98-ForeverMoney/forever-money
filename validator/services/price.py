@@ -1,6 +1,6 @@
 import aiohttp
 import logging
-from typing import Optional
+from typing import Dict
 import bittensor as bt
 import asyncio
 
@@ -13,6 +13,17 @@ class PriceService:
     BASE_URL = "https://api.coingecko.com/api/v3"
     COINGECKO_TAO_ID = "bittensor"  # Bittensor TAO on Coingecko
     COINGECKO_ALPHA_ID = "forevermoney"  # Alpha on Coingecko
+
+    # CoinGecko asset platform IDs by chain_id (for /coins/{id}/contract/{addr}/market_chart)
+    CHAIN_ID_TO_PLATFORM: Dict[int, str] = {
+        1: "ethereum",
+        8453: "base",
+        137: "polygon-pos",
+        42161: "arbitrum-one",
+        10: "optimistic-ethereum",
+        43114: "avalanche",
+        56: "binance-smart-chain",
+    }
 
     @staticmethod
     async def get_tao_price_usd() -> float:
@@ -36,13 +47,10 @@ class PriceService:
                         return float(tao_price)
                     else:
                         logger.warning(f"Coingecko API returned status {response.status}")
-                        return 1.0
         except asyncio.TimeoutError:
             logger.warning("Timeout fetching TAO price from Coingecko")
-            return 1.0
         except Exception as e:
             logger.error(f"Failed to fetch TAO price: {e}")
-            return 1.0
 
     @staticmethod
     async def get_alpha_price_tao(subtensor: bt.Subtensor, netuid: int) -> float:
@@ -60,7 +68,6 @@ class PriceService:
             return float(alpha_price_tao)
         except Exception as e:
             logger.error(f"Failed to fetch Alpha price (TAO): {e}")
-            return 1.0
 
     @staticmethod
     async def get_alpha_price_usd(subtensor: bt.Subtensor, netuid: int) -> float:
@@ -80,21 +87,69 @@ class PriceService:
             return alpha_price_usd
         except Exception as e:
             logger.error(f"Failed to fetch Alpha price (USD): {e}")
-            return 1.0
 
     @staticmethod
     async def get_token_price(token_address: str, chain_id: int = 8453) -> float:
         """
-        Get token price from Coingecko or on-chain DEX.
+        Get current token price in USD from CoinGecko.
 
-        Args:
-            token_address: Token contract address
-            chain_id: Chain ID (e.g., 8453 for Base)
+        Raises:
+            ValueError: On invalid args (unknown chain_id, empty token_address).
+            RuntimeError: On fetch failure (timeout, HTTP error, no prices).
+            Exception: Re-raised from underlying errors.
 
         Returns:
-            Token price in USD
+            Token price in USD.
         """
-        # TODO: Implement real fetching from Coingecko or DEX
-        # For now, return placeholder
-        logger.warning(f"get_token_price not fully implemented for {token_address}")
-        return 1.0
+        platform = PriceService.CHAIN_ID_TO_PLATFORM.get(chain_id)
+        if not platform:
+            raise ValueError(
+                f"chain_id={chain_id} not in CHAIN_ID_TO_PLATFORM"
+            )
+
+        raw = (token_address or "").strip()
+        if not raw:
+            raise ValueError("empty token_address")
+        low = raw.lower()
+        addr = low if low.startswith("0x") else "0x" + low
+
+        url = (
+            f"{PriceService.BASE_URL}/coins/{platform}/contract/{addr}/market_chart"
+        )
+        params = {"vs_currency": "usd", "days": "1"}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params=params, timeout=aiohttp.ClientTimeout(total=15)
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"CoinGecko returned status {response.status} "
+                            f"for {token_address} on {platform}"
+                        )
+                    data = await response.json()
+        except asyncio.TimeoutError as e:
+            logger.warning(
+                f"Timeout fetching token price for {token_address} (chain_id={chain_id})"
+            )
+            raise RuntimeError(
+                f"Timeout fetching token price for {token_address} "
+                f"(chain_id={chain_id})"
+            ) from e
+        except (ValueError, RuntimeError):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to fetch token price for {token_address}: {e}")
+            raise
+
+        prices = data.get("prices") or []
+        if not prices:
+            raise RuntimeError(
+                f"No prices returned for {token_address} on {platform}"
+            )
+
+        # prices = [[timestamp_ms, price], ...]; use latest (last) price
+        prices.sort(key=lambda p: p[0])
+        _, last_price = prices[-1]
+        return float(last_price)

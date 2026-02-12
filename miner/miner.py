@@ -14,8 +14,17 @@ import time
 from typing import Optional, Tuple, Any
 import bittensor as bt
 
+
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
 from protocol.synapses import RebalanceQuery
-from validator.utils.env import MINER_VERSION, NETUID, SUBTENSOR_NETWORK
+from protocol.models import Position
+from validator.utils.env import MINER_VERSION, NETUID, SUBTENSOR_NETWORK, BT_WALLET_PATH
+from validator.utils.math import UniswapV3Math
 
 # Configure logging
 logging.basicConfig(
@@ -70,8 +79,6 @@ class SN98Miner:
         """
         Handle RebalanceQuery synapse from validators.
         """
-        import math
-        # Position is already imported at module level
 
         logger.info(f"Received RebalanceQuery: block={synapse.block_number}, rebalances={synapse.rebalances_so_far}")
         
@@ -89,7 +96,7 @@ class SN98Miner:
         # 2. If we have positions, check if price is near the edge.
         # 3. If price is near edge, rebalance.
         
-        current_tick = self._get_tick_from_price(synapse.current_price)
+        current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(synapse.current_price)
         
         should_rebalance = False
         if not synapse.current_positions:
@@ -108,13 +115,13 @@ class SN98Miner:
 
         if should_rebalance:
             # Create new position centered on current tick
-            width = 2000 # Configurable width
-            tick_spacing = 200 # Usually 100 or 200 depending on pool
-            
-            # Snap to spacing
-            center_tick = round(current_tick / tick_spacing) * tick_spacing
-            lower_tick = center_tick - width
-            upper_tick = center_tick + width
+            width = 2000  # Configurable width
+            tick_spacing = synapse.tick_spacing  # From validator via liq_manager.get_tick_spacing()
+
+            # Snap to tick spacing (ticks must be multiples of spacing)
+            center_tick = (current_tick // tick_spacing) * tick_spacing
+            lower_tick = (center_tick - width) // tick_spacing * tick_spacing
+            upper_tick = (center_tick + width) // tick_spacing * tick_spacing
             
             # Allocate all available inventory
             # Note: validator will calculate actual amounts used based on price
@@ -128,25 +135,11 @@ class SN98Miner:
             synapse.desired_positions = [new_pos]
             logger.info(f"Proposing new position: [{lower_tick}, {upper_tick}]")
         else:
-            synapse.desired_positions = None # Keep current
+            # Keep current positions: return current_positions instead of None
+            synapse.desired_positions = list(synapse.current_positions)
             logger.info("Keeping current positions.")
 
         return synapse
-
-    def _get_tick_from_price(self, sqrt_price_x96: float) -> int:
-        """Estimate tick from sqrtPriceX96."""
-        # sqrt_price = sqrt_price_x96 / 2^96
-        # price = sqrt_price ** 2
-        # tick = log(price) / log(1.0001)
-        # tick = 2 * log(sqrt_price) / log(1.0001)
-        import math
-        
-        if sqrt_price_x96 <= 0:
-            return 0
-            
-        sqrt_price = float(sqrt_price_x96) / (2**96)
-        tick = 2 * math.log(sqrt_price) / math.log(1.0001)
-        return int(tick)
 
     def _should_accept_job(self, synapse: RebalanceQuery) -> Tuple[bool, Optional[str]]:
         """
@@ -258,7 +251,7 @@ def get_config():
         "--wallet.hotkey", type=str, required=True, help="Wallet hotkey"
     )
     parser.add_argument(
-        "--wallet.path", type=str, default="~/.bittensor/wallets", help="Wallet path"
+        "--wallet.path", type=str, default=BT_WALLET_PATH, help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)"
     )
 
     # Network arguments

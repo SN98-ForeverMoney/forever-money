@@ -28,6 +28,25 @@ Validators run multiple jobs (liquidity management tasks) concurrently. For each
 - Score = value_gain × exp(-10 × loss%) if gaining, value_gain / exp(-10 × loss%) if losing
 - 10% inventory loss → 63% score reduction; 50% loss → 99% reduction
 
+**Run Your Validator:**
+```bash
+pm2 start validator/validator.py \
+    --name validator -- \
+    --wallet.name <wallet> \
+    --wallet.hotkey <hotkey> \
+    --subtensor.network <network> \
+    --netuid <NETUID>
+```
+
+Example:
+```bash
+pm2 start validator/validator.py \
+    --name validator -- \
+    --wallet.name validator \
+    --wallet.hotkey default \
+    --netuid 98
+```
+
 For detailed system architecture see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 ## For Miners
@@ -36,7 +55,21 @@ For detailed system architecture see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 **Run Your Miner:**
 ```bash
-python -m miner.miner --wallet.name <wallet> --wallet.hotkey <hotkey>
+pm2 start miner/miner.py \
+    --name miner -- \
+    --wallet.name <wallet> \
+    --wallet.hotkey <hotkey> \
+    --subtensor.network <network> \
+    --netuid <NETUID>
+```
+
+Example:
+```bash
+pm2 start miner/miner.py \
+    --name miner -- \
+    --wallet.name coldkey \
+    --wallet.hotkey hotkey \
+    --netuid 98
 ```
 
 For complete implementation guide, scoring details, and code examples, see **[MINER_GUIDE.md](./MINER_GUIDE.md)**.

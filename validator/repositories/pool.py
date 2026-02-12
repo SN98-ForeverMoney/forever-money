@@ -444,7 +444,7 @@ class PoolDataDB(DataSource):
     @retry_on_db_error
     async def get_miner_vault_fees(
         self,
-        sn_liquditiy_manager_addresses: List[str],
+        sn_liquidity_manager_addresses: List[str],
         start_block: int,
         end_block: int,
     ) -> Dict[str, Dict[str, float]]:
@@ -453,11 +453,11 @@ class PoolDataDB(DataSource):
         Used for the 30% LP Alignment score.
 
         Returns:
-            Dictionary mapping sn_liquditiy_manager_address to {'fee0': float, 'fee1': float}
+            Dictionary mapping sn_liquidity_manager_address to {'fee0': float, 'fee1': float}
         """
         # Clean addresses
         clean_addresses = [
-            addr.lower().replace("0x", "") for addr in sn_liquditiy_manager_addresses
+            addr.lower().replace("0x", "") for addr in sn_liquidity_manager_addresses
         ]
 
         results = await (
