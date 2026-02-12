@@ -135,7 +135,8 @@ class SN98Miner:
             synapse.desired_positions = [new_pos]
             logger.info(f"Proposing new position: [{lower_tick}, {upper_tick}]")
         else:
-            synapse.desired_positions = None # Keep current
+            # Keep current positions: return current_positions instead of None
+            synapse.desired_positions = list(synapse.current_positions)
             logger.info("Keeping current positions.")
 
         return synapse

@@ -50,7 +50,7 @@ class EmissionsService:
 
         try:
             revenue = await self.revenue_service.get_total_vault_revenue_usd(
-                lookback_days=30
+                lookback_days=1
             )
             return revenue
         except Exception as e:
@@ -238,41 +238,40 @@ class EmissionsService:
 
     async def get_miner_aggregate_scores(self) -> Dict[int, float]:
         """
-        Calculate aggregate score for each miner across all jobs.
-        
-        Uses combined_score from MinerScore model, which aggregates:
-        - Performance scores from evaluation/live rounds
-        - LP alignment scores
-        
+        Calculate aggregate score for miners, using only the single top miner per job.
+
+        For each job we select only the top miner (by combined_score). A miner can
+        be top on multiple jobs; their aggregate score is the sum of their
+        combined_scores for those jobs. Only these per-job winners receive
+        non-zero weight.
+
         Returns:
-            Dict mapping miner_uid -> aggregate_score
+            Dict mapping miner_uid -> aggregate_score (only uids that are top for at least one job)
         """
         try:
-            # Get all active jobs
             active_jobs = await self.job_repository.get_active_jobs()
             if not active_jobs:
                 logger.warning("No active jobs found for miner scoring")
                 return {}
 
             scores = {}
-            
-            # Aggregate scores across all jobs
-            for job in active_jobs:
-                # Get top miners for this job (sorted by combined_score)
-                miner_scores = await self.job_repository.get_eligible_miners(job.job_id)
-                for miner_score in miner_scores:
-                    uid = miner_score.miner_uid
-                    combined_score = miner_score.combined_score
+            top_miner_per_job = []
 
-                    # Aggregate: sum of combined scores across all jobs
-                    # Top miners will have higher aggregate scores
-                    scores[uid] = scores.get(uid, 0.0) + float(combined_score)
-            
-            # Log top miners
-            if scores:
-                top_miners = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
-                logger.info(f"Top 5 miners by aggregate score: {top_miners}")
-            
+            for job in active_jobs:
+                # Get eligible miners sorted by combined_score (best first)
+                miner_scores = await self.job_repository.get_eligible_miners(job.job_id)
+                if not miner_scores:
+                    continue
+                # Select only the single top miner for this job
+                top = miner_scores[0]
+                uid = top.miner_uid
+                combined_score = float(top.combined_score)
+                scores[uid] = scores.get(uid, 0.0) + combined_score
+                top_miner_per_job.append((job.job_id, uid, combined_score))
+
+            for job_id, uid, score in top_miner_per_job:
+                logger.info(f"Top miner for job {job_id}: uid={uid}, score={score}")
+
             return scores
         except Exception as e:
             logger.error(f"Failed to get miner aggregate scores: {e}")

@@ -169,8 +169,8 @@ async def run_with_miner_for_evaluation(
                 }
             if response.desired_positions is None:
                 logger.info(
-                    f"Miner {miner_uid} returned no desired_positions (likely not running), "
-                    "score=0"
+                    f"Miner {miner_uid} returned desired_positions=None (likely not "
+                    "running / no response), score=0"
                 )
                 return {
                     "accepted": False,
@@ -181,15 +181,15 @@ async def run_with_miner_for_evaluation(
                     "score": 0.0,
                     "total_query_time_ms": total_query_time_ms,
                 }
-            if _positions_within_tolerance(
+            elif _positions_within_tolerance(
                 current_positions, response.desired_positions
             ):
-                logger.debug(
+                logger.info(
                     f"Positions within {REBALANCE_TOLERANCE*100:.0f}% tolerance, "
                     f"skipping rebalance at block {current_block}"
                 )
             else:
-                logger.debug(
+                logger.info(
                     f"Miner {miner_uid} rebalancing at block {current_block}: "
                     f"{len(response.desired_positions)} positions"
                 )
@@ -256,6 +256,8 @@ async def run_with_miner_for_evaluation(
     miner_score_val = await Scorer.score_pol_strategy(metrics=performance_metrics)
     # Score/participation updates happen in run_evaluation_round after winner selection
     # so tie-breaking uses pre-update combined_score.
+    
+    logger.info(f"Miner {miner_uid} score: {miner_score_val}")
 
     serialized_history = [_serialize_history_item(h) for h in rebalance_history]
     serialized_metrics = _serialize_metrics(performance_metrics)
@@ -269,6 +271,238 @@ async def run_with_miner_for_evaluation(
         "score": miner_score_val,
         "total_query_time_ms": total_query_time_ms,
     }
+
+
+async def run_with_miners_batch_for_evaluation(
+    *,
+    miner_uids: List[int],
+    job: Job,
+    round_: Round,
+    initial_positions: List[Position],
+    start_block: int,
+    initial_inventory: Inventory,
+    rebalance_check_interval: int,
+    liq_manager,
+    job_repository,
+    dendrite,
+    metagraph,
+    backtester,
+    get_block_fn: Callable[[int], Any],
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Run backtest for multiple miners with correct per-miner state.
+
+    At each rebalance step we query all miners in parallel (one dendrite call per
+    miner, each with that miner's own current_positions, current_inventory,
+    rebalances_so_far). So each miner receives the correct synapse (their own
+    state). Wall-clock time per step is ~one RTT because calls are concurrent.
+
+    Returns:
+        Dict mapping miner_uid -> result dict (accepted, score, rebalance_history, etc.)
+    """
+    if not miner_uids:
+        return {}
+
+    logger.info(
+        f"[ROUND={round_.round_id}] Starting parallel per-miner evaluation: "
+        f"job={job.job_id}, miners={len(miner_uids)} uids={miner_uids[:10]}{'...' if len(miner_uids) > 10 else ''}, "
+        f"start_block={start_block}, rebalance_interval={rebalance_check_interval}"
+    )
+    rtype = _round_type_str(round_)
+    tick_spacing = await liq_manager.get_tick_spacing()
+
+    # Per-miner state (each miner gets their own evolving state)
+    per_miner_positions: Dict[int, List[Position]] = {
+        uid: list(initial_positions) for uid in miner_uids
+    }
+    per_miner_inventory: Dict[int, Inventory] = {
+        uid: initial_inventory for uid in miner_uids
+    }
+    per_miner_rebalances_so_far: Dict[int, int] = {uid: 0 for uid in miner_uids}
+    per_miner_history: Dict[int, List[Dict]] = {uid: [] for uid in miner_uids}
+    per_miner_refused: Dict[int, Any] = {}  # uid -> refusal_reason or None
+    per_miner_query_time_ms: Dict[int, int] = {uid: 0 for uid in miner_uids}
+
+    current_block = start_block
+    step_count = 0
+
+    while round_.round_deadline >= datetime.now(timezone.utc):
+        if (current_block - start_block) % rebalance_check_interval == 0:
+            step_count += 1
+            active_count = len(miner_uids) - len(per_miner_refused)
+            logger.debug(
+                f"[ROUND={round_.round_id}] Rebalance step {step_count} at block {current_block}: "
+                f"{active_count} miners still active (refused so far: {len(per_miner_refused)})"
+            )
+            price_at_query = await liq_manager.get_current_price()
+
+            # One query per miner, each with that miner's own state; run all in parallel
+            async def query_one(uid: int):
+                if uid in per_miner_refused:
+                    return uid, None
+                return uid, await query_miner_for_rebalance(
+                    dendrite,
+                    metagraph,
+                    miner_uid=uid,
+                    job_id=job.job_id,
+                    sn_liquidity_manager_address=job.sn_liquidity_manager_address,
+                    pair_address=job.pair_address,
+                    round_id=round_.round_id,
+                    round_type=rtype,
+                    block_number=current_block,
+                    current_price=price_at_query,
+                    current_positions=per_miner_positions[uid],
+                    inventory=per_miner_inventory[uid],
+                    rebalances_so_far=per_miner_rebalances_so_far[uid],
+                    tick_spacing=tick_spacing,
+                )
+
+            t0 = time.time()
+            query_results = await asyncio.gather(
+                *[query_one(uid) for uid in miner_uids]
+            )
+            elapsed_ms = int((time.time() - t0) * 1000)
+            for uid in miner_uids:
+                per_miner_query_time_ms[uid] = per_miner_query_time_ms.get(uid, 0) + elapsed_ms
+            logger.debug(
+                f"[ROUND={round_.round_id}] Step {step_count} parallel query done: "
+                f"block={current_block}, elapsed_ms={elapsed_ms}"
+            )
+
+            rebalance_price = await liq_manager.get_current_price()
+
+            for uid, response in query_results:
+                if uid in per_miner_refused:
+                    continue
+                if response is None or not response.accepted:
+                    reason = (
+                        getattr(response, "refusal_reason", None)
+                        if response
+                        else "Timeout or error"
+                    )
+                    per_miner_refused[uid] = reason
+                    logger.info(f"Miner {uid} refused or failed: {reason}")
+                    continue
+                if response.desired_positions is None:
+                    per_miner_refused[uid] = "Miner not running"
+                    continue
+                if _positions_within_tolerance(
+                    per_miner_positions[uid], response.desired_positions
+                ):
+                    continue
+                inv = per_miner_inventory[uid]
+                total_a0, total_a1 = 0, 0
+                for pos in response.desired_positions:
+                    _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
+                        pos.tick_lower,
+                        pos.tick_upper,
+                        rebalance_price,
+                        int(pos.allocation0),
+                        int(pos.allocation1),
+                    )
+                    total_a0 += a0
+                    total_a1 += a1
+                inv_0 = int(inv.amount0) - total_a0
+                inv_1 = int(inv.amount1) - total_a1
+                if inv_0 < 0 or inv_1 < 0:
+                    per_miner_refused[uid] = "Insufficient inventory from desired positions"
+                    continue
+                new_inventory = Inventory(amount0=str(inv_0), amount1=str(inv_1))
+                entry = {
+                    "block": current_block,
+                    "price": rebalance_price,
+                    "price_in_query": price_at_query,
+                    "old_positions": per_miner_positions[uid],
+                    "new_positions": response.desired_positions,
+                    "inventory": new_inventory,
+                }
+                per_miner_history[uid].append(entry)
+                per_miner_positions[uid] = response.desired_positions
+                per_miner_inventory[uid] = new_inventory
+                per_miner_rebalances_so_far[uid] = per_miner_rebalances_so_far[uid] + 1
+                logger.debug(
+                    f"[ROUND={round_.round_id}] Miner {uid} rebalanced at block {current_block}: "
+                    f"rebalances_so_far={per_miner_rebalances_so_far[uid]}"
+                )
+
+        else:
+            await asyncio.sleep(1)
+        current_block = await get_block_fn(job.chain_id)
+
+    refused_count = len(per_miner_refused)
+    completed_count = sum(1 for uid in miner_uids if uid not in per_miner_refused and per_miner_history[uid])
+    logger.info(
+        f"[ROUND={round_.round_id}] Backtest loop finished: end_block={current_block}, "
+        f"steps={step_count}, refused={refused_count}, completed_with_rebalances={completed_count}"
+    )
+
+    # Build result per miner: backtest and score
+    results: Dict[int, Dict[str, Any]] = {}
+    for uid in miner_uids:
+        if uid in per_miner_refused:
+            results[uid] = {
+                "accepted": False,
+                "refusal_reason": per_miner_refused[uid],
+                "rebalance_history": [],
+                "final_positions": [
+                    p.dict() for p in per_miner_positions[uid] if hasattr(p, "dict")
+                ],
+                "performance_metrics": {},
+                "score": 0.0,
+                "total_query_time_ms": per_miner_query_time_ms.get(uid, 0),
+            }
+            continue
+        history = per_miner_history[uid]
+        if not history:
+            results[uid] = {
+                "accepted": True,
+                "refusal_reason": None,
+                "rebalance_history": [],
+                "final_positions": [
+                    p.dict() for p in per_miner_positions[uid] if hasattr(p, "dict")
+                ],
+                "performance_metrics": {},
+                "score": 0.0,
+                "total_query_time_ms": per_miner_query_time_ms.get(uid, 0),
+            }
+            continue
+        performance_metrics = await backtester.evaluate_positions_performance(
+            job.pair_address,
+            history,
+            start_block,
+            current_block,
+            initial_inventory,
+            job.fee_rate,
+        )
+        miner_score_val = await Scorer.score_pol_strategy(metrics=performance_metrics)
+        serialized_history = [_serialize_history_item(h) for h in history]
+        serialized_metrics = _serialize_metrics(performance_metrics)
+        final_positions_ser = [
+            p.dict() for p in per_miner_positions[uid] if hasattr(p, "dict")
+        ]
+        results[uid] = {
+            "accepted": True,
+            "refusal_reason": None,
+            "rebalance_history": serialized_history,
+            "final_positions": final_positions_ser,
+            "performance_metrics": serialized_metrics,
+            "score": miner_score_val,
+            "total_query_time_ms": per_miner_query_time_ms.get(uid, 0),
+        }
+        logger.info(
+            f"Backtest complete for miner {uid}: {len(history)} rebalances, "
+            f"score={miner_score_val}"
+        )
+
+    accepted_uids = [uid for uid in miner_uids if results[uid]["accepted"]]
+    scores_str = ", ".join(f"{uid}={results[uid]['score']:.4f}" for uid in accepted_uids[:5])
+    if len(accepted_uids) > 5:
+        scores_str += f", ... ({len(accepted_uids)} total)"
+    logger.info(
+        f"[ROUND={round_.round_id}] Parallel evaluation done: "
+        f"accepted={len(accepted_uids)}, refused={refused_count}, scores=[{scores_str}]"
+    )
+    return results
 
 
 async def run_with_miner_for_live(

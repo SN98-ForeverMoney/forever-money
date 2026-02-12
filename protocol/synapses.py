@@ -27,7 +27,7 @@ class RebalanceQuery(bt.Synapse):
     1. Generates initial positions for a job
     2. Simulates trading with those positions
     3. Periodically queries miners with current state
-    4. Miners respond with new positions (or None to keep current positions)
+    4. Miners respond with new positions (or current_positions to keep current)
 
     Request fields (sent by validator):
         - job_id: Job identifier
@@ -80,9 +80,9 @@ class RebalanceQuery(bt.Synapse):
     )
     desired_positions: Optional[List[Position]] = Field(
         None,
-        description="Positions desired to be live. "
-        "Any existing positions not matching the "
-        "desired positions (up to 2% difference tolerance) will be burned.",
+        description="Positions desired to be live. Miner must return current_positions "
+        "when keeping current; None means no response (non-running/timeout). "
+        "Any existing positions not matching desired (within 2% tolerance) are burned.",
     )
 
     miner_metadata: Optional[MinerMetadata] = Field(None, description="Miner metadata")
