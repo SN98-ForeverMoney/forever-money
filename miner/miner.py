@@ -14,8 +14,17 @@ import time
 from typing import Optional, Tuple, Any
 import bittensor as bt
 
+
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
 from protocol.synapses import RebalanceQuery
-from validator.utils.env import MINER_VERSION, NETUID, SUBTENSOR_NETWORK
+from protocol.models import Position
+from validator.utils.env import MINER_VERSION, NETUID, SUBTENSOR_NETWORK, BT_WALLET_PATH
+from validator.utils.math import UniswapV3Math
 
 # Configure logging
 logging.basicConfig(
@@ -69,22 +78,68 @@ class SN98Miner:
     async def rebalance_query_handler(self, synapse: RebalanceQuery) -> RebalanceQuery:
         """
         Handle RebalanceQuery synapse from validators.
-
-        The validator is running a backtest simulation and asking:
-        "At this block, with these positions, should I rebalance?"
-
-        Miners can:
-        1. Refuse the job entirely (accepted=False)
-        2. Keep current positions (new_positions=current_positions)
-        3. Rebalance to new positions (new_positions=[...])
-
-        Args:
-            synapse: RebalanceQuery synapse with simulation state
-
-        Returns:
-            RebalanceQuery synapse with response populated
         """
-        pass
+
+        logger.info(f"Received RebalanceQuery: block={synapse.block_number}, rebalances={synapse.rebalances_so_far}")
+        
+        # Check if we should accept
+        should_accept, refusal_reason = self._should_accept_job(synapse)
+        if not should_accept:
+            synapse.accepted = False
+            synapse.refusal_reason = refusal_reason
+            return synapse
+
+        synapse.accepted = True
+        
+        # Simple Logic:
+        # 1. If we have no positions, deploy a range.
+        # 2. If we have positions, check if price is near the edge.
+        # 3. If price is near edge, rebalance.
+        
+        current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(synapse.current_price)
+        
+        should_rebalance = False
+        if not synapse.current_positions:
+            should_rebalance = True
+            logger.info("No current positions. Rebalancing initialized.")
+        else:
+            # Check existing positions
+            # Assuming we manage one main position for simplicity
+            pos = synapse.current_positions[0]
+            tick_width = pos.tick_upper - pos.tick_lower
+            buffer = tick_width * 0.2 # Rebalance if within 20% of edge
+            
+            if current_tick < pos.tick_lower + buffer or current_tick > pos.tick_upper - buffer:
+                should_rebalance = True
+                logger.info(f"Price (tick {current_tick}) near edge of [{pos.tick_lower}, {pos.tick_upper}]. Rebalancing.")
+
+        if should_rebalance:
+            # Create new position centered on current tick
+            width = 2000  # Configurable width
+            tick_spacing = synapse.tick_spacing  # From validator via liq_manager.get_tick_spacing()
+
+            # Snap to tick spacing (ticks must be multiples of spacing)
+            center_tick = (current_tick // tick_spacing) * tick_spacing
+            lower_tick = (center_tick - width) // tick_spacing * tick_spacing
+            upper_tick = (center_tick + width) // tick_spacing * tick_spacing
+            
+            # Allocate all available inventory
+            # Note: validator will calculate actual amounts used based on price
+            new_pos = Position(
+                tick_lower=lower_tick,
+                tick_upper=upper_tick,
+                allocation0=synapse.inventory_remaining["amount0"],
+                allocation1=synapse.inventory_remaining["amount1"]
+            )
+            
+            synapse.desired_positions = [new_pos]
+            logger.info(f"Proposing new position: [{lower_tick}, {upper_tick}]")
+        else:
+            # Keep current positions: return current_positions instead of None
+            synapse.desired_positions = list(synapse.current_positions)
+            logger.info("Keeping current positions.")
+
+        return synapse
 
     def _should_accept_job(self, synapse: RebalanceQuery) -> Tuple[bool, Optional[str]]:
         """
@@ -195,6 +250,9 @@ def get_config():
     parser.add_argument(
         "--wallet.hotkey", type=str, required=True, help="Wallet hotkey"
     )
+    parser.add_argument(
+        "--wallet.path", type=str, default=BT_WALLET_PATH, help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)"
+    )
 
     # Network arguments
     parser.add_argument(
@@ -210,8 +268,10 @@ def get_config():
         help=f"Network UID. Default: {NETUID}",
     )
 
-    # Parse config with bt.config to get bittensor defaults
-    config = bt.config(parser)
+    bt.Axon.add_args(parser)
+
+    # Parse config with bt.Config to get bittensor defaults
+    config = bt.Config(parser)
 
     # Override with CLI args or environment variables
     # Priority: CLI args > env vars > defaults
@@ -247,7 +307,7 @@ def main():
     logger.info(f"Config: {config}")
 
     # Create wallet
-    wallet = bt.wallet(config=config)
+    wallet = bt.Wallet(config=config)
     logger.info(f"Wallet: {wallet}")
 
     # Create subtensor

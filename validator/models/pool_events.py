@@ -18,13 +18,13 @@ class SwapEvent(Model):
     Tracks token exchanges with price and liquidity information.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     evt_address = fields.CharField(
-        max_length=42, index=True
+        max_length=42, db_index=True
     )  # Pool address (without 0x)
-    evt_block_number = fields.BigIntField(index=True)
+    evt_block_number = fields.BigIntField(db_index=True)
     evt_tx_hash = fields.CharField(max_length=66)
-    evt_block_time = fields.DatetimeField(null=True)
+    evt_block_time = fields.BigIntField(null=True)  # Unix timestamp
 
     # Swap details
     sqrt_price_x96 = fields.DecimalField(max_digits=78, decimal_places=0)  # uint160
@@ -50,13 +50,13 @@ class MintEvent(Model):
     Tracks when liquidity providers add liquidity to specific tick ranges.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     evt_address = fields.CharField(
-        max_length=42, index=True
+        max_length=42, db_index=True
     )  # Pool address (without 0x)
-    evt_block_number = fields.BigIntField(index=True)
+    evt_block_number = fields.BigIntField(db_index=True)
     evt_tx_hash = fields.CharField(max_length=66)
-    evt_block_time = fields.DatetimeField(null=True)
+    evt_block_time = fields.BigIntField(null=True)  # Unix timestamp
 
     # Mint details
     tick_lower = fields.IntField()
@@ -82,13 +82,13 @@ class BurnEvent(Model):
     Tracks when liquidity providers remove liquidity from specific tick ranges.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     evt_address = fields.CharField(
-        max_length=42, index=True
+        max_length=42, db_index=True
     )  # Pool address (without 0x)
-    evt_block_number = fields.BigIntField(index=True)
+    evt_block_number = fields.BigIntField(db_index=True)
     evt_tx_hash = fields.CharField(max_length=66)
-    evt_block_time = fields.DatetimeField(null=True)
+    evt_block_time = fields.BigIntField(null=True)  # Unix timestamp
 
     # Burn details
     tick_lower = fields.IntField()
@@ -113,13 +113,13 @@ class CollectEvent(Model):
     Tracks when liquidity providers collect their earned fees.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     evt_address = fields.CharField(
-        max_length=42, index=True
+        max_length=42, db_index=True
     )  # Pool address (without 0x)
-    evt_block_number = fields.BigIntField(index=True)
+    evt_block_number = fields.BigIntField(db_index=True)
     evt_tx_hash = fields.CharField(max_length=66)
-    evt_block_time = fields.DatetimeField(null=True)
+    evt_block_time = fields.BigIntField(null=True)  # Unix timestamp
 
     # Collect details
     tick_lower = fields.IntField()

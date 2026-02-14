@@ -1,3 +1,4 @@
+import math
 from typing import Tuple
 
 
@@ -15,6 +16,25 @@ class UniswapV3Math:
     MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342
 
     @staticmethod
+    def sqrt_price_x96_to_price(sqrt_price_x96: int, decimals0: int = 18, decimals1: int = 18) -> float:
+        """
+        Convert sqrtPriceX96 to human-readable price (token1/token0).
+
+        Args:
+            sqrt_price_x96: The sqrtPriceX96 value from slot0
+            decimals0: Decimals of token0 (default 18)
+            decimals1: Decimals of token1 (default 18)
+
+        Returns:
+            Price as float (token1 per token0)
+        """
+        # price = (sqrtPriceX96 / 2^96)^2
+        price = (sqrt_price_x96 / UniswapV3Math.Q96) ** 2
+        # Adjust for decimals: price * 10^(decimals0 - decimals1)
+        price = price * (10 ** (decimals0 - decimals1))
+        return price
+
+    @staticmethod
     def get_sqrt_ratio_at_tick(tick: int) -> int:
         if tick < UniswapV3Math.MIN_TICK or tick > UniswapV3Math.MAX_TICK:
             raise ValueError("T")
@@ -23,7 +43,7 @@ class UniswapV3Math:
 
         ratio = (
             0xFFFCB933BD6FAD37AA2D162D1A594001
-            if abs_tick & 0x1 == 0
+            if abs_tick & 0x1 != 0
             else 0x100000000000000000000000000000000
         )
 
@@ -71,6 +91,17 @@ class UniswapV3Math:
 
         # round up to match Solidity
         return (ratio >> 32) + (1 if ratio & ((1 << 32) - 1) != 0 else 0)
+
+    @staticmethod
+    def get_tick_from_sqrt_price_x96(sqrt_price_x96: float) -> int:
+        """
+        Estimate tick from sqrtPriceX96.
+        """
+        if sqrt_price_x96 <= 0:
+            return 0
+        sqrt_price = float(sqrt_price_x96) / UniswapV3Math.Q96
+        tick = 2 * math.log(sqrt_price) / math.log(1.0001)
+        return int(tick)
 
     # -----------------------------
     # Liquidity math

@@ -12,6 +12,7 @@ from web3 import Web3
 from web3.contract import AsyncContract
 
 from protocol import Inventory, Position
+from validator.utils.math import UniswapV3Math
 from validator.utils.web3 import AsyncWeb3Helper, ZERO_ADDRESS
 
 logger = logging.getLogger(__name__)
@@ -154,15 +155,15 @@ class SnLiqManagerService:
                 ak_address = registered_token1
                 logger.info(f"Using token1 ({token1}) as registered AK")
 
-        # Step 3: Exit if neither token is registered
+        # Step 3: Raise exception if neither token is registered (don't exit - let caller handle)
         if ak_address is None:
             error_msg = (
                 f"Neither token0 ({token0}) nor token1 ({token1}) is registered "
                 f"in LiquidityManager at {self.liq_manager.address}. "
-                f"Cannot determine inventory. Exiting."
+                f"Cannot determine inventory."
             )
             logger.error(error_msg)
-            raise SystemExit(error_msg)
+            raise ValueError(error_msg)
 
         # Step 4: Query stashed tokens for both token0 and token1
         amount0, amount1 = await asyncio.gather(
@@ -183,6 +184,10 @@ class SnLiqManagerService:
         """Get the current price of the pool."""
         slot0 = await self.pool.functions.slot0().call()
         return slot0[0]
+
+    async def get_tick_spacing(self) -> int:
+        """Get the tick spacing of the pool."""
+        return await self.pool.functions.tickSpacing().call()
 
     async def get_current_positions(self) -> List[Position]:
         # 1. Create pool contract to get tokens
@@ -218,6 +223,9 @@ class SnLiqManagerService:
             )
 
         logger.debug(f"Position manager: {position_manager_address}")
+
+        # Get current pool price for amount calculations
+        current_sqrt_price_x96 = await self.get_current_price()
 
         # 4. Get token IDs from position manager
         pos_manager_contract = AsyncWeb3Helper.make_web3(chain_id=self.chain_id).make_contract_by_name(
@@ -262,14 +270,20 @@ class SnLiqManagerService:
                     f"liquidity {liquidity}"
                 )
 
-                # Convert liquidity to amounts (simplified - using liquidity as allocation)
-                # In production, you'd calculate proper token amounts based on liquidity and ticks
+                # Convert liquidity to actual amounts based on current price
+                amount0, amount1 = UniswapV3Math.get_amounts_for_liquidity(
+                    current_sqrt_price_x96,
+                    UniswapV3Math.get_sqrt_ratio_at_tick(tick_lower),
+                    UniswapV3Math.get_sqrt_ratio_at_tick(tick_upper),
+                    liquidity,
+                )
+
                 positions.append(
                     Position(
                         tick_lower=tick_lower,
                         tick_upper=tick_upper,
-                        allocation0=str(liquidity // 2),  # Simplified allocation
-                        allocation1=str(liquidity // 2),  # Simplified allocation
+                        allocation0=str(amount0),
+                        allocation1=str(amount1),
                     )
                 )
             except Exception as e:
