@@ -9,6 +9,7 @@ Supports:
 - Async/await with Tortoise ORM
 - Rebalance-only protocol
 """
+
 import argparse
 import asyncio
 import logging
@@ -37,7 +38,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
-    BT_WALLET_PATH
+    BT_WALLET_PATH,
 )
 
 # Configure logging
@@ -94,9 +95,15 @@ def get_config():
     parser = argparse.ArgumentParser(description="SN98 ForeverMoney Validator")
 
     # Wallet arguments
-    parser.add_argument("--wallet.name", type=str, required=True, help="Wallet name")
     parser.add_argument(
-        "--wallet.hotkey", type=str, required=True, help="Wallet hotkey"
+        "--wallet.name", type=str, required=True, default="default", help="Wallet name"
+    )
+    parser.add_argument(
+        "--wallet.hotkey",
+        type=str,
+        required=True,
+        default="default",
+        help="Wallet hotkey",
     )
     parser.add_argument(
         "--wallet.path",
@@ -134,9 +141,9 @@ def get_config():
     }
 
     # Build Tortoise DB URL from environment
-    config[
-        "tortoise_db_url"
-    ] = f"postgres://{JOBS_POSTGRES_USER}:{JOBS_POSTGRES_PASSWORD}@{JOBS_POSTGRES_HOST}:{JOBS_POSTGRES_PORT}/{JOBS_POSTGRES_DB}"
+    config["tortoise_db_url"] = (
+        f"postgres://{JOBS_POSTGRES_USER}:{JOBS_POSTGRES_PASSWORD}@{JOBS_POSTGRES_HOST}:{JOBS_POSTGRES_PORT}/{JOBS_POSTGRES_DB}"
+    )
 
     return config
 
@@ -170,11 +177,18 @@ async def run_jobs_validator(config):
         if metagraph.hotkeys[uid] == my_hotkey:
             my_uid = uid
             break
+    # Exit the process when the hotkey is not registered
+    if my_uid is None:
+        logger.error(f"Hotkey {my_hotkey} is not registered on netuid {config['netuid']} (network: {config['subtensor_network']})")
+        logger.info("Exiting the process...")
+        sys.exit(1)
+
     config["my_uid"] = my_uid
 
     logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
     logger.info(f"Network: {config['subtensor_network']}")
     logger.info(f"Netuid: {config['netuid']}")
+    logger.info(f"Validator UID: {my_uid}")
     logger.info(f"Protocol: Rebalance-only (no StrategyRequest)")
 
     # Initialize Tortoise ORM
@@ -195,14 +209,13 @@ async def run_jobs_validator(config):
     )
     logger.info("Async round orchestrator initialized")
 
-    # Initialize pool data DB and revenue service (for emissions Taoflow optimization)
+    # Initialize pool data DB and revenue service
     pool_data_db = PoolDataDB()
     revenue_service = RevenueService(
         job_repository=job_repository,
         pool_data_db=pool_data_db,
     )
     logger.info("Revenue service initialized")
-
 
     # Initialize emissions service
     emissions_service = EmissionsService(
@@ -279,7 +292,7 @@ async def run_jobs_validator(config):
     async def monitor_and_set_weights():
         """Continuously calculate and set weights."""
         weight_set_interval = 1200  # 20 mins
-        
+
         while True:
             try:
                 logger.info("Running weight setting cycle...")

@@ -238,7 +238,7 @@ class SnLiqManagerService:
             logger.warning(f"No token ids found: {e}")
             return []
 
-        logger.debug(f"Found {len(token_ids)} token IDs: {token_ids}")
+        logger.debug(f"Found {len(token_ids)} token ID(s): {token_ids}")
         if not token_ids:
             return []
 

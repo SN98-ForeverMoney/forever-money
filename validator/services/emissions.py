@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmissionsService:
-    """Service to calculate and set weights for miner emissions with Taoflow optimization."""
+    """Service to calculate and set weights for miner emissions."""
 
     def __init__(
         self,
@@ -142,7 +142,7 @@ class EmissionsService:
 
     async def calculate_weights(self, miner_scores: Dict[int, float]) -> Tuple[List[int], List[float]]:
         """
-        Calculate weights for all uids with Taoflow optimization.
+        Calculate weights for all uids.
 
         Logic:
         - Unprofitable: 100% to UID 0 (burn)
@@ -279,7 +279,7 @@ class EmissionsService:
 
     async def set_weights_on_chain(self, wallet: bt.Wallet, netuid: int):
         """
-        Calculate and set weights on chain using Taoflow optimization.
+        Calculate and set weights on chain.
         
         This method:
         1. Gets aggregate miner scores
@@ -288,7 +288,7 @@ class EmissionsService:
         4. Sets weights on-chain via subtensor
         """
         logger.info("=" * 60)
-        logger.info("Starting weight setting process (Taoflow optimization)...")
+        logger.info("Starting weight setting process...")
         logger.info("=" * 60)
         
         # 1. Get aggregate scores

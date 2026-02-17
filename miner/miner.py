@@ -8,6 +8,7 @@ Uses rebalance-only protocol:
 Usage:
     python -m miner.miner --wallet.name <wallet_name> --wallet.hotkey <hotkey_name>
 """
+
 import logging
 import argparse
 import time
@@ -80,8 +81,10 @@ class SN98Miner:
         Handle RebalanceQuery synapse from validators.
         """
 
-        logger.info(f"Received RebalanceQuery: block={synapse.block_number}, rebalances={synapse.rebalances_so_far}")
-        
+        logger.info(
+            f"Received RebalanceQuery: block={synapse.block_number}, rebalances={synapse.rebalances_so_far}"
+        )
+
         # Check if we should accept
         should_accept, refusal_reason = self._should_accept_job(synapse)
         if not should_accept:
@@ -90,14 +93,14 @@ class SN98Miner:
             return synapse
 
         synapse.accepted = True
-        
+
         # Simple Logic:
         # 1. If we have no positions, deploy a range.
         # 2. If we have positions, check if price is near the edge.
         # 3. If price is near edge, rebalance.
-        
+
         current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(synapse.current_price)
-        
+
         should_rebalance = False
         if not synapse.current_positions:
             should_rebalance = True
@@ -107,31 +110,38 @@ class SN98Miner:
             # Assuming we manage one main position for simplicity
             pos = synapse.current_positions[0]
             tick_width = pos.tick_upper - pos.tick_lower
-            buffer = tick_width * 0.2 # Rebalance if within 20% of edge
-            
-            if current_tick < pos.tick_lower + buffer or current_tick > pos.tick_upper - buffer:
+            buffer = tick_width * 0.2  # Rebalance if within 20% of edge
+
+            if (
+                current_tick < pos.tick_lower + buffer
+                or current_tick > pos.tick_upper - buffer
+            ):
                 should_rebalance = True
-                logger.info(f"Price (tick {current_tick}) near edge of [{pos.tick_lower}, {pos.tick_upper}]. Rebalancing.")
+                logger.info(
+                    f"Price (tick {current_tick}) near edge of [{pos.tick_lower}, {pos.tick_upper}]. Rebalancing."
+                )
 
         if should_rebalance:
             # Create new position centered on current tick
             width = 2000  # Configurable width
-            tick_spacing = synapse.tick_spacing  # From validator via liq_manager.get_tick_spacing()
+            tick_spacing = (
+                synapse.tick_spacing
+            )  # From validator via liq_manager.get_tick_spacing()
 
             # Snap to tick spacing (ticks must be multiples of spacing)
             center_tick = (current_tick // tick_spacing) * tick_spacing
             lower_tick = (center_tick - width) // tick_spacing * tick_spacing
             upper_tick = (center_tick + width) // tick_spacing * tick_spacing
-            
+
             # Allocate all available inventory
             # Note: validator will calculate actual amounts used based on price
             new_pos = Position(
                 tick_lower=lower_tick,
                 tick_upper=upper_tick,
                 allocation0=synapse.inventory_remaining["amount0"],
-                allocation1=synapse.inventory_remaining["amount1"]
+                allocation1=synapse.inventory_remaining["amount1"],
             )
-            
+
             synapse.desired_positions = [new_pos]
             logger.info(f"Proposing new position: [{lower_tick}, {upper_tick}]")
         else:
@@ -246,12 +256,17 @@ def get_config():
     parser = argparse.ArgumentParser(description="SN98 ForeverMoney Miner")
 
     # Wallet arguments
-    parser.add_argument("--wallet.name", type=str, required=True, help="Wallet name")
     parser.add_argument(
-        "--wallet.hotkey", type=str, required=True, help="Wallet hotkey"
+        "--wallet.name", type=str, required=True, default="default", help="Wallet name"
     )
     parser.add_argument(
-        "--wallet.path", type=str, default=BT_WALLET_PATH, help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)"
+        "--wallet.hotkey", type=str, required=True, default="default", help="Wallet hotkey"
+    )
+    parser.add_argument(
+        "--wallet.path",
+        type=str,
+        default=BT_WALLET_PATH,
+        help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)",
     )
 
     # Network arguments
@@ -275,14 +290,14 @@ def get_config():
 
     # Override with CLI args or environment variables
     # Priority: CLI args > env vars > defaults
-    if hasattr(config, 'subtensor') and hasattr(config, 'subtensor.network'):
+    if hasattr(config, "subtensor") and hasattr(config, "subtensor.network"):
         # CLI arg provided
         pass
     elif SUBTENSOR_NETWORK:
         # Use env var
         config.subtensor.network = SUBTENSOR_NETWORK
 
-    if hasattr(config, 'netuid') and config.netuid is not None:
+    if hasattr(config, "netuid") and config.netuid is not None:
         # CLI arg provided
         pass
     elif NETUID:
@@ -323,6 +338,7 @@ def main():
 
     # Run miner (synchronous Bittensor serving)
     miner.run()
+
 
 if __name__ == "__main__":
     main()

@@ -64,7 +64,7 @@ class JobRepository:
             List of active Job objects
         """
         jobs = await Job.filter(is_active=True).order_by("created_at")
-        logger.info(f"Found {len(jobs)} active jobs")
+        logger.info(f"Found {len(jobs)} active job(s)")
         return jobs
 
     async def create_round(
