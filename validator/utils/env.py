@@ -90,6 +90,7 @@ BT_WALLET_PATH = get_env_variable(
     type_=str,
     default="~/.bittensor/wallets",
 )
+
 # Database configuration
 JOBS_POSTGRES_HOST = get_env_variable(
     name="JOBS_POSTGRES_HOST",
