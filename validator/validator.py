@@ -40,6 +40,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_PASSWORD,
     JOBS_POSTGRES_SCHEMA,
     BT_WALLET_PATH,
+    MINER_ELIGIBILITY_DAYS,
 )
 
 # Configure logging
@@ -191,6 +192,7 @@ async def run_jobs_validator(config):
     logger.info(f"Netuid: {config['netuid']}")
     logger.info(f"Validator UID: {my_uid}")
     logger.info(f"Protocol: Rebalance-only (no StrategyRequest)")
+    logger.info(f"Miner Eligibility period: {MINER_ELIGIBILITY_DAYS} day(s)")
 
     # Initialize Tortoise ORM
     logger.info("Initializing Tortoise ORM...")
@@ -242,6 +244,10 @@ async def run_jobs_validator(config):
         check_interval = 60  # Check for new jobs every 60 seconds
 
         while True:
+
+            logger.info("-" * 80)
+            logger.info(f"Checking for new jobs...")
+
             try:
                 # Get all active jobs from database
                 active_jobs = await job_repository.get_active_jobs()
@@ -250,6 +256,7 @@ async def run_jobs_validator(config):
                     logger.warning(
                         "No active jobs found. Waiting for jobs to be added..."
                     )
+                    logger.info("-" * 80)
                     await asyncio.sleep(check_interval)
                     continue
 
@@ -286,6 +293,8 @@ async def run_jobs_validator(config):
                     f"Currently running {len(running_jobs)} job(s): {list(running_jobs.keys())}"
                 )
 
+                logger.info(f"Waiting for {check_interval} seconds before next check...")
+                logger.info("-" * 80)
                 await asyncio.sleep(check_interval)
 
             except Exception as e:

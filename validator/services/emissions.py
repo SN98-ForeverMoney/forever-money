@@ -334,3 +334,7 @@ class EmissionsService:
                 logger.error("✗ Failed to set weights (subtensor returned False)")
         except Exception as e:
             logger.error(f"✗ Error setting weights: {e}", exc_info=True)
+        
+        logger.info("=" * 60)
+        logger.info("Weight setting process completed.")
+        logger.info("=" * 60)

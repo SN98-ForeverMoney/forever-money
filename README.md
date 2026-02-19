@@ -11,7 +11,7 @@ SN98 ForeverMoney is a Bittensor subnet that optimizes Uniswap V3 / Aerodrome li
 - **Dual-Mode Operation** - Evaluation rounds (all miners) + Live rounds (winners only)
 - **Rebalance-Only Protocol** - Miners decide when and how to adjust positions
 - **Per-Job Reputation** - Miners build scores for specific trading pairs
-- **7-Day Participation Requirement** - Consistent performance needed for live execution
+- **Participation Requirement** - Consistent performance needed for live execution (default: 7 days)
 
 ## Network Information
 
@@ -19,14 +19,14 @@ SN98 ForeverMoney is a Bittensor subnet that optimizes Uniswap V3 / Aerodrome li
 - **Network**: Bittensor
 - **Protocol**: Uniswap V3 / Aerodrome
 - **Round Duration**: Configurable (e.g., 15 minutes)
-- **Live Eligibility**: 7 days participation
+- **Live Eligibility**: Configurable (default: 7 days participation)
 
 ## How It Works
 
 Validators run multiple jobs (liquidity management tasks) concurrently. For each job:
 
 1. **Evaluation Rounds** - All miners compete in forward simulations from current blockchain state
-2. **Live Rounds** - Winning miners (after 7 days participation) execute strategies on-chain
+2. **Live Rounds** - Winning miners (after eligible participation period) execute strategies on-chain
 3. **Scoring** - Miners scored on absolute inventory protection and value growth
 4. **Reputation** - Build per-job scores through exponential moving averages
 

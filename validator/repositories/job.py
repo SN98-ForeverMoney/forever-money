@@ -287,7 +287,7 @@ class JobRepository:
         Updates:
         - Daily participation record
         - Participation days count
-        - Eligibility for live mode (7+ days)
+        - Eligibility for live mode (MINER_ELIGIBILITY_DAYS+ days)
 
         Args:
             job_id: Job identifier
@@ -310,16 +310,18 @@ class JobRepository:
             await participation.save()
 
         # Update eligibility
+        from validator.utils.env import MINER_ELIGIBILITY_DAYS
+
         score = await MinerScore.get_or_none(job=job, miner_uid=miner_uid)
         if score:
-            # Count distinct days in last 7 days
-            seven_days_ago = today - timedelta(days=7)
+            # Count distinct days in last N days
+            cutoff_date = today - timedelta(days=MINER_ELIGIBILITY_DAYS)
             participation_count = await MinerParticipation.filter(
-                job=job, miner_uid=miner_uid, participation_date__gte=seven_days_ago
+                job=job, miner_uid=miner_uid, participation_date__gte=cutoff_date
             ).count()
 
             score.participation_days = participation_count
-            score.is_eligible_for_live = participation_count >= 7
+            score.is_eligible_for_live = participation_count >= MINER_ELIGIBILITY_DAYS
             await score.save()
 
     async def get_eligible_miners(
