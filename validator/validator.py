@@ -38,6 +38,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
+    JOBS_POSTGRES_SCHEMA,
     BT_WALLET_PATH,
 )
 
@@ -158,7 +159,7 @@ async def run_jobs_validator(config):
         config: Configuration dictionary
     """
     logger.info("=" * 80)
-    logger.info("STARTING SN98 VALIDATOR (ASYNC JOBS-BASED ARCHITECTURE)")
+    logger.info("STARTING FOREVERMONEY VALIDATOR (ASYNC JOBS-BASED ARCHITECTURE)")
     logger.info("=" * 80)
 
     # Initialize Bittensor components
@@ -193,7 +194,9 @@ async def run_jobs_validator(config):
 
     # Initialize Tortoise ORM
     logger.info("Initializing Tortoise ORM...")
-    await init_db(config["tortoise_db_url"])
+    db_schema = "validator" if config["subtensor_network"] == "test" else JOBS_POSTGRES_SCHEMA
+    logger.info(f"Using schema: {db_schema}")
+    await init_db(config["tortoise_db_url"], schema=db_schema)
     logger.info("Database connected")
 
     # Initialize async job manager

@@ -117,6 +117,7 @@ JOBS_POSTGRES_PASSWORD = get_env_variable(
     type_=str,
     default="",
 )
+JOBS_POSTGRES_SCHEMA = "public"
 
 # Miner configuration
 MINER_VERSION = get_env_variable(
