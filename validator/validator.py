@@ -277,14 +277,14 @@ async def run_jobs_validator(config):
                         )
                         running_jobs[job.job_id] = task
 
-                        logger.info(f"Started orchestration for job {job.job_id}")
+                        logger.info(f"Started orchestration for job '{job.job_id}'")
 
                 # Check for inactive jobs (jobs that were removed or deactivated)
                 current_job_ids = {job.job_id for job in active_jobs}
                 removed_jobs = set(running_jobs.keys()) - current_job_ids
 
                 for job_id in removed_jobs:
-                    logger.info(f"Job {job_id} is no longer active, cancelling task")
+                    logger.info(f"Job '{job_id}' is no longer active, cancelling task")
                     running_jobs[job_id].cancel()
                     del running_jobs[job_id]
 
