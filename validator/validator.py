@@ -127,6 +127,13 @@ def get_config():
         default=NETUID,
         help=f"Network UID. Default: {NETUID}",
     )
+    parser.add_argument(
+        "--auto-update",
+        type=str,
+        default="true",
+        choices=("true", "false"),
+        help="Run auto-update script every 3600s to sync with subnet latest release. Default: true",
+    )
 
     args = parser.parse_args()
 
@@ -140,6 +147,7 @@ def get_config():
         "executor_bot_url": EXECUTOR_BOT_URL,
         "executor_bot_api_key": EXECUTOR_BOT_API_KEY,
         "rebalance_check_interval": REBALANCE_CHECK_INTERVAL,
+        "auto_update": getattr(args, "auto_update", "true") == "true",
     }
 
     # Build Tortoise DB URL from environment
@@ -314,12 +322,56 @@ async def run_jobs_validator(config):
                 logger.error(f"Error in weight setter: {e}")
                 await asyncio.sleep(60)
 
-    try:
-        # Run the job monitor and weight setter concurrently
-        await asyncio.gather(
-            monitor_and_run_jobs(),
-            monitor_and_set_weights(),
+    AUTO_UPDATE_INTERVAL = 3600  # 1 hour
+
+    async def auto_update_loop():
+        """Run update script every 3600s (1 hour)."""
+        script_path = os.path.join(
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+            "scripts",
+            "update_to_latest.sh",
         )
+        if not os.path.isfile(script_path):
+            logger.warning("Auto-update enabled but script not found: %s", script_path)
+            return
+        while True:
+            await asyncio.sleep(AUTO_UPDATE_INTERVAL)
+            try:
+                logger.info("Running auto-update (sync with subnet latest release)...")
+                proc = await asyncio.create_subprocess_exec(
+                    "bash",
+                    script_path,
+                    cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    logger.info("Auto-update completed successfully (pm2 may restart this process).")
+                else:
+                    logger.warning(
+                        "Auto-update script exited with code %s: %s",
+                        proc.returncode,
+                        (stderr or stdout or b"").decode(errors="replace").strip() or "(no output)",
+                    )
+            except Exception as e:
+                logger.error("Auto-update failed: %s", e, exc_info=True)
+
+    tasks = [
+        monitor_and_run_jobs(),
+        monitor_and_set_weights(),
+    ]
+    if config.get("auto_update", True):
+        logger.info(
+            "Auto-update enabled: will run every %s seconds",
+            AUTO_UPDATE_INTERVAL,
+        )
+        tasks.append(auto_update_loop())
+    else:
+        logger.info("Auto-update disabled (use --auto-update true to enable).")
+
+    try:
+        await asyncio.gather(*tasks)
 
     except KeyboardInterrupt:
         logger.info("\n" + "=" * 80)

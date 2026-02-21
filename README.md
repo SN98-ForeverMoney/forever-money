@@ -127,6 +127,29 @@ Validators evaluate miner strategies and execute winning strategies on-chain.
         --netuid 98
     ```
 
+3.  **Auto-Update (optional)**  
+    By default the validator runs an auto-update task every **1 hour**: it executes `scripts/update_to_latest.sh` to fetch the latest release from the repo, install dependencies, and (if you use PM2) restart processes so new code is loaded.
+
+    - **Enable (default):** `--auto-update true` — runs the update script every 3600 seconds.
+    - **Disable:** `--auto-update false` — no automatic updates.
+
+    ```bash
+    # Disable auto-update
+    python validator/validator.py \
+        --wallet.name <your_wallet> \
+        --wallet.hotkey <your_hotkey> \
+        --netuid 98 \
+        --auto-update false
+    ```
+
+    You can also run the update script manually from the repo root:
+    ```bash
+    chmod +x scripts/update_to_latest.sh
+    ./scripts/update_to_latest.sh              # update to latest release tag
+    ./scripts/update_to_latest.sh main         # update to branch main instead
+    ./scripts/update_to_latest.sh --no-restart # skip pm2 restart
+    ```
+
 For detailed system architecture, see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 ---
