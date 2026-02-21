@@ -11,7 +11,7 @@ SN98 ForeverMoney is a Bittensor subnet that optimizes Uniswap V3 / Aerodrome li
 - **Dual-Mode Operation** - Evaluation rounds (all miners) + Live rounds (winners only)
 - **Rebalance-Only Protocol** - Miners decide when and how to adjust positions
 - **Per-Job Reputation** - Miners build scores for specific trading pairs
-- **7-Day Participation Requirement** - Consistent performance needed for live execution
+- **Participation Requirement** - Consistent performance needed for live execution (default: 7 days)
 
 ## Network Information
 
@@ -19,14 +19,14 @@ SN98 ForeverMoney is a Bittensor subnet that optimizes Uniswap V3 / Aerodrome li
 - **Network**: Bittensor
 - **Protocol**: Uniswap V3 / Aerodrome
 - **Round Duration**: Configurable (e.g., 15 minutes)
-- **Live Eligibility**: 7 days participation
+- **Live Eligibility**: Configurable (default: 7 days participation)
 
 ## How It Works
 
 Validators run multiple jobs (liquidity management tasks) concurrently. For each job:
 
 1. **Evaluation Rounds** - All miners compete in forward simulations from current blockchain state
-2. **Live Rounds** - Winning miners (after 7 days participation) execute strategies on-chain
+2. **Live Rounds** - Winning miners (after eligible participation period) execute strategies on-chain
 3. **Scoring** - Miners scored on absolute inventory protection and value growth
 4. **Reputation** - Build per-job scores through exponential moving averages
 
@@ -125,6 +125,29 @@ Validators evaluate miner strategies and execute winning strategies on-chain.
         --wallet.name <your_wallet> \
         --wallet.hotkey <your_hotkey> \
         --netuid 98
+    ```
+
+3.  **Auto-Update (optional)**  
+    By default the validator runs an auto-update task every **1 hour**: it executes `scripts/update_to_latest.sh` to fetch the latest release from the repo, install dependencies, and (if you use PM2) restart processes so new code is loaded.
+
+    - **Enable (default):** `--auto-update true` — runs the update script every 3600 seconds.
+    - **Disable:** `--auto-update false` — no automatic updates.
+
+    ```bash
+    # Disable auto-update
+    python validator/validator.py \
+        --wallet.name <your_wallet> \
+        --wallet.hotkey <your_hotkey> \
+        --netuid 98 \
+        --auto-update false
+    ```
+
+    You can also run the update script manually from the repo root:
+    ```bash
+    chmod +x scripts/update_to_latest.sh
+    ./scripts/update_to_latest.sh              # update to latest release tag
+    ./scripts/update_to_latest.sh main         # update to branch main instead
+    ./scripts/update_to_latest.sh --no-restart # skip pm2 restart
     ```
 
 For detailed system architecture, see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.

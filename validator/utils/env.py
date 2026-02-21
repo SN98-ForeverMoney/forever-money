@@ -117,11 +117,17 @@ JOBS_POSTGRES_PASSWORD = get_env_variable(
     type_=str,
     default="",
 )
+JOBS_POSTGRES_SCHEMA = "public"
 
 # Miner configuration
 MINER_VERSION = get_env_variable(
     name="MINER_VERSION",
     type_=str,
     default="0.1.0",
+)
+MINER_ELIGIBILITY_DAYS = get_env_variable(
+    name="MINER_ELIGIBILITY_DAYS",
+    type_=int,
+    default=7,
 )
 

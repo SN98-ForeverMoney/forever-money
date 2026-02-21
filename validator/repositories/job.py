@@ -23,6 +23,8 @@ from validator.models.job import (
     RoundStatus,
 )
 from validator.services.scorer import Scorer
+from validator.utils.env import MINER_ELIGIBILITY_DAYS
+from validator.utils.whitelist import is_miner_whitelisted
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +289,7 @@ class JobRepository:
         Updates:
         - Daily participation record
         - Participation days count
-        - Eligibility for live mode (7+ days)
+        - Eligibility for live mode (MINER_ELIGIBILITY_DAYS+ days OR whitelisted)
 
         Args:
             job_id: Job identifier
@@ -312,15 +314,31 @@ class JobRepository:
         # Update eligibility
         score = await MinerScore.get_or_none(job=job, miner_uid=miner_uid)
         if score:
-            # Count distinct days in last 7 days
-            seven_days_ago = today - timedelta(days=7)
-            participation_count = await MinerParticipation.filter(
-                job=job, miner_uid=miner_uid, participation_date__gte=seven_days_ago
-            ).count()
+            # Check whitelist
+            is_whitelisted = is_miner_whitelisted(score.miner_hotkey)
 
-            score.participation_days = participation_count
-            score.is_eligible_for_live = participation_count >= 7
+            if is_whitelisted:
+                logger.info(
+                    f"Miner {miner_uid} ({score.miner_hotkey}) is whitelisted"
+                )
+                score.is_eligible_for_live = True
+            else:
+                # Count distinct days in last N days
+                cutoff_date = today - timedelta(days=MINER_ELIGIBILITY_DAYS)
+                participation_count = await MinerParticipation.filter(
+                    job=job, miner_uid=miner_uid, participation_date__gte=cutoff_date
+                ).count()
+
+                score.participation_days = participation_count
+                score.is_eligible_for_live = participation_count >= MINER_ELIGIBILITY_DAYS
+            
             await score.save()
+
+            if score.is_eligible_for_live:
+                logger.info(
+                    f"Miner {miner_uid} ({score.miner_hotkey}) is eligible for live execution"
+                )
+
 
     async def get_eligible_miners(
         self, job_id: str, min_score: float = 0.0

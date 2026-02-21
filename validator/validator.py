@@ -38,7 +38,9 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
+    JOBS_POSTGRES_SCHEMA,
     BT_WALLET_PATH,
+    MINER_ELIGIBILITY_DAYS,
 )
 
 # Configure logging
@@ -125,6 +127,13 @@ def get_config():
         default=NETUID,
         help=f"Network UID. Default: {NETUID}",
     )
+    parser.add_argument(
+        "--auto-update",
+        type=str,
+        default="true",
+        choices=("true", "false"),
+        help="Run auto-update script every 3600s to sync with subnet latest release. Default: true",
+    )
 
     args = parser.parse_args()
 
@@ -138,6 +147,7 @@ def get_config():
         "executor_bot_url": EXECUTOR_BOT_URL,
         "executor_bot_api_key": EXECUTOR_BOT_API_KEY,
         "rebalance_check_interval": REBALANCE_CHECK_INTERVAL,
+        "auto_update": getattr(args, "auto_update", "true") == "true",
     }
 
     # Build Tortoise DB URL from environment
@@ -158,7 +168,7 @@ async def run_jobs_validator(config):
         config: Configuration dictionary
     """
     logger.info("=" * 80)
-    logger.info("STARTING SN98 VALIDATOR (ASYNC JOBS-BASED ARCHITECTURE)")
+    logger.info("STARTING FOREVERMONEY VALIDATOR (ASYNC JOBS-BASED ARCHITECTURE)")
     logger.info("=" * 80)
 
     # Initialize Bittensor components
@@ -190,10 +200,13 @@ async def run_jobs_validator(config):
     logger.info(f"Netuid: {config['netuid']}")
     logger.info(f"Validator UID: {my_uid}")
     logger.info(f"Protocol: Rebalance-only (no StrategyRequest)")
+    logger.info(f"Miner Eligibility period: {MINER_ELIGIBILITY_DAYS} day(s)")
 
     # Initialize Tortoise ORM
     logger.info("Initializing Tortoise ORM...")
-    await init_db(config["tortoise_db_url"])
+    db_schema = "validator" if config["subtensor_network"] == "test" else JOBS_POSTGRES_SCHEMA
+    logger.info(f"Using schema: {db_schema}")
+    await init_db(config["tortoise_db_url"], schema=db_schema)
     logger.info("Database connected")
 
     # Initialize async job manager
@@ -239,6 +252,10 @@ async def run_jobs_validator(config):
         check_interval = 60  # Check for new jobs every 60 seconds
 
         while True:
+
+            logger.info("-" * 80)
+            logger.info(f"Checking for new jobs...")
+
             try:
                 # Get all active jobs from database
                 active_jobs = await job_repository.get_active_jobs()
@@ -247,6 +264,7 @@ async def run_jobs_validator(config):
                     logger.warning(
                         "No active jobs found. Waiting for jobs to be added..."
                     )
+                    logger.info("-" * 80)
                     await asyncio.sleep(check_interval)
                     continue
 
@@ -267,14 +285,14 @@ async def run_jobs_validator(config):
                         )
                         running_jobs[job.job_id] = task
 
-                        logger.info(f"Started orchestration for job {job.job_id}")
+                        logger.info(f"Started orchestration for job '{job.job_id}'")
 
                 # Check for inactive jobs (jobs that were removed or deactivated)
                 current_job_ids = {job.job_id for job in active_jobs}
                 removed_jobs = set(running_jobs.keys()) - current_job_ids
 
                 for job_id in removed_jobs:
-                    logger.info(f"Job {job_id} is no longer active, cancelling task")
+                    logger.info(f"Job '{job_id}' is no longer active, cancelling task")
                     running_jobs[job_id].cancel()
                     del running_jobs[job_id]
 
@@ -283,6 +301,8 @@ async def run_jobs_validator(config):
                     f"Currently running {len(running_jobs)} job(s): {list(running_jobs.keys())}"
                 )
 
+                logger.info(f"Waiting for {check_interval} seconds before next check...")
+                logger.info("-" * 80)
                 await asyncio.sleep(check_interval)
 
             except Exception as e:
@@ -302,12 +322,56 @@ async def run_jobs_validator(config):
                 logger.error(f"Error in weight setter: {e}")
                 await asyncio.sleep(60)
 
-    try:
-        # Run the job monitor and weight setter concurrently
-        await asyncio.gather(
-            monitor_and_run_jobs(),
-            monitor_and_set_weights(),
+    AUTO_UPDATE_INTERVAL = 3600  # 1 hour
+
+    async def auto_update_loop():
+        """Run update script every 3600s (1 hour)."""
+        script_path = os.path.join(
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+            "scripts",
+            "update_to_latest.sh",
         )
+        if not os.path.isfile(script_path):
+            logger.warning("Auto-update enabled but script not found: %s", script_path)
+            return
+        while True:
+            await asyncio.sleep(AUTO_UPDATE_INTERVAL)
+            try:
+                logger.info("Running auto-update (sync with subnet latest release)...")
+                proc = await asyncio.create_subprocess_exec(
+                    "bash",
+                    script_path,
+                    cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    logger.info("Auto-update completed successfully (pm2 may restart this process).")
+                else:
+                    logger.warning(
+                        "Auto-update script exited with code %s: %s",
+                        proc.returncode,
+                        (stderr or stdout or b"").decode(errors="replace").strip() or "(no output)",
+                    )
+            except Exception as e:
+                logger.error("Auto-update failed: %s", e, exc_info=True)
+
+    tasks = [
+        monitor_and_run_jobs(),
+        monitor_and_set_weights(),
+    ]
+    if config.get("auto_update", True):
+        logger.info(
+            "Auto-update enabled: will run every %s seconds",
+            AUTO_UPDATE_INTERVAL,
+        )
+        tasks.append(auto_update_loop())
+    else:
+        logger.info("Auto-update disabled (use --auto-update true to enable).")
+
+    try:
+        await asyncio.gather(*tasks)
 
     except KeyboardInterrupt:
         logger.info("\n" + "=" * 80)

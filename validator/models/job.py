@@ -15,6 +15,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
+    JOBS_POSTGRES_SCHEMA
 )
 
 
@@ -262,6 +263,7 @@ TORTOISE_ORM = {
                 "user": JOBS_POSTGRES_USER,
                 "password": JOBS_POSTGRES_PASSWORD,
                 "database": JOBS_POSTGRES_DB,
+                "schema": JOBS_POSTGRES_SCHEMA,
             },
         }
     },
@@ -278,23 +280,44 @@ TORTOISE_ORM = {
 }
 
 
-async def init_db(db_url: Optional[str] = None):
+async def init_db(db_url: Optional[str] = None, schema: Optional[str] = None):
     """
     Initialize Tortoise ORM.
 
     Args:
         db_url: Optional database URL (postgresql+asyncpg://user:pass@host:port/db)
+        schema: Optional schema name.
     """
     if db_url:
-        await Tortoise.init(
-            db_url=db_url,
-            modules={
-                "models": [
-                    "validator.models.job",
-                    "validator.models.pool_events",
-                ],
+        modules = {
+            "models": [
+                "validator.models.job",
+                "validator.models.pool_events",
+            ],
+        }
+        config = {
+            "connections": {"default": db_url},
+            "apps": {
+                "models": {
+                    "models": modules["models"],
+                    "default_connection": "default",
+                }
             },
-        )
+        }
+        if schema:
+            config["connections"]["default"] = {
+                "engine": "tortoise.backends.asyncpg",
+                "credentials": {
+                    "host": JOBS_POSTGRES_HOST,
+                    "port": JOBS_POSTGRES_PORT,
+                    "user": JOBS_POSTGRES_USER,
+                    "password": JOBS_POSTGRES_PASSWORD,
+                    "database": JOBS_POSTGRES_DB,
+                    "schema": schema,
+                },
+            }
+        
+        await Tortoise.init(config=config)
     else:
         await Tortoise.init(config=TORTOISE_ORM)
 
