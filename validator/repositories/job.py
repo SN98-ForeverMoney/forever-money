@@ -356,10 +356,12 @@ class JobRepository:
         """
         job = await Job.get(job_id=job_id)
 
+        # Combined score must be strictly > 0 (exclude zero)
+        score_threshold = max(0.0, min_score)
         scores = await MinerScore.filter(
             job=job,
             is_eligible_for_live=True,
-            combined_score__gte=Decimal(str(min_score)),
+            combined_score__gt=Decimal(str(score_threshold)),
         ).order_by("-combined_score", "-total_evaluations", "-total_live_rounds")
 
         return scores
