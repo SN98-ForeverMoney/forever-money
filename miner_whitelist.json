@@ -1,10 +1,14 @@
 [
   {
-    "name": "SURF",
+    "name": "SURF - testnet",
     "hotkey": "5HpiKNPM655YQ8DtgFrccwHfaArfPZ26njXnQwYsUyzCgUFc"
   },
   {
-    "name": "1XBT",
+    "name": "1XBT - testnet",
     "hotkey": "5GWTh593NiGTN4kwNnhKPPVzXDfo3Jbx2172DNC1wk8zo1xp"
+  },
+  {
+    "name": "1XBT - mainnet",
+    "hotkey": "5DRixFFJ2JTQVFhVg5GQpgCGP7xA33SncmmNFw22LuhLVv7T"
   }
 ]
