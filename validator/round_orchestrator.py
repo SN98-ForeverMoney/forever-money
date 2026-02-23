@@ -151,8 +151,9 @@ class AsyncRoundOrchestrator:
         winner = await select_winner(self.job_repository, job.job_id, scores)
         if winner:
             logger.info(
-                f"Evaluation round {round_number} winner: Miner {winner['miner_uid']} "
-                f"(Score: {winner['score']:.4f})"
+                f"Winner (evaluation round #{round_number}, job {job.job_id}): "
+                f"Miner UID={winner['miner_uid']}, score={winner['score']:.4f}, "
+                f"hotkey={winner['hotkey']}"
             )
         else:
             logger.warning(f"No winner for evaluation round {round_number}")
@@ -219,6 +220,10 @@ class AsyncRoundOrchestrator:
         round_number = round_obj.round_number
         logger.info("=" * 60)
         logger.info(
+            f"Winner for live execution (job {job.job_id}, round #{round_number}): "
+            f"Miner UID={winner_uid}, hotkey={self.metagraph.hotkeys[winner_uid]}"
+        )
+        logger.info(
             f"Starting LIVE round #{round_number} for job {job.job_id} with Miner {winner_uid}"
         )
         logger.info("=" * 60)
@@ -251,6 +256,33 @@ class AsyncRoundOrchestrator:
             execution_failures = result.get("execution_failures", 0)
             execution_results = result.get("execution_results", [])
             total_executions = len(execution_results)
+            rebalance_history = result.get("rebalance_history", [])
+            logger.info(
+                f"Live execution summary (job {job.job_id}, round #{round_number}, "
+                f"winner Miner {winner_uid}): {len(rebalance_history)} rebalance(s), "
+                f"{total_executions - execution_failures}/{total_executions} on-chain execution(s) succeeded, "
+                f"score={result.get('score', 0):.4f}"
+            )
+            if rebalance_history:
+                for i, step in enumerate(rebalance_history):
+                    new_pos = step.get("new_positions") or []
+                    n_pos = len(new_pos)
+                    pos_desc = []
+                    for p in new_pos[:5]:  # log up to 5 positions
+                        if hasattr(p, "tick_lower"):
+                            pos_desc.append(
+                                f"[tick_{p.tick_lower}_{p.tick_upper} "
+                                f"a0={getattr(p, 'allocation0', '?')} a1={getattr(p, 'allocation1', '?')}]"
+                            )
+                        else:
+                            pos_desc.append(str(p)[:80])
+                    if len(new_pos) > 5:
+                        pos_desc.append(f"...+{len(new_pos) - 5} more")
+                    logger.info(
+                        f"  Live strategy step {i + 1}: {n_pos} position(s) "
+                        f"block={step.get('block')} tx_hash={step.get('tx_hash') or 'N/A'} "
+                        f"positions={', '.join(pos_desc) if pos_desc else 'none'}"
+                    )
             if total_executions > 0 and execution_failures == total_executions:
                 logger.error(
                     f"All {total_executions} executions failed for miner {winner_uid} "

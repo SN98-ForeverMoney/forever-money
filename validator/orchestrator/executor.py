@@ -64,6 +64,12 @@ async def execute_strategy_onchain(
         "miner_uid": miner_uid,
     }
 
+    logger.info(
+        f"Executing live strategy: job={job.job_id} round={round_obj.round_id} "
+        f"winner_miner_uid={miner_uid} positions={len(positions)} "
+        f"detail={positions}"
+    )
+
     execution_id = None
     tx_hash = None
     error = None
@@ -100,6 +106,11 @@ async def execute_strategy_onchain(
                     tx_hash=tx_hash,
                 )
                 execution_id = ex.execution_id
+                logger.info(
+                    f"Live execution recorded: execution_id={execution_id} "
+                    f"job={job.job_id} round={round_obj.round_id} miner_uid={miner_uid} "
+                    f"tx_hash={tx_hash or 'pending'}"
+                )
                 if error:
                     ex.tx_status = "failed"
                     ex.actual_performance = {"error": error}
