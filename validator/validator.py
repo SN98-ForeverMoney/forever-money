@@ -261,7 +261,7 @@ async def run_jobs_validator(config):
 
     async def monitor_and_run_jobs():
         """Continuously monitor for new jobs and start them."""
-        check_interval = 60  # Check for new jobs every 60 seconds
+        check_interval = 900  # Check for new jobs every 15 minutes
 
         while True:
 
