@@ -489,6 +489,22 @@ class JobRepository:
                 winners[job.job_id] = top.miner_uid
         return winners
 
+    async def zero_out_miner(self, miner_uid: int) -> None:
+        """
+        Remove all DB data for a miner_uid (e.g. after hotkey replacement).
+        Deletes MinerScore, MinerParticipation, Prediction, and LiveExecution
+        for this uid so the new hotkey at this uid starts with a clean slate.
+        """
+        deleted_scores = await MinerScore.filter(miner_uid=miner_uid).delete()
+        deleted_participation = await MinerParticipation.filter(miner_uid=miner_uid).delete()
+        deleted_predictions = await Prediction.filter(miner_uid=miner_uid).delete()
+        deleted_executions = await LiveExecution.filter(miner_uid=miner_uid).delete()
+        logger.info(
+            f"Zeroed out miner_uid={miner_uid}: MinerScore={deleted_scores}, "
+            f"MinerParticipation={deleted_participation}, Prediction={deleted_predictions}, "
+            f"LiveExecution={deleted_executions}"
+        )
+
     async def create_live_execution(
         self,
         round_id: str,
