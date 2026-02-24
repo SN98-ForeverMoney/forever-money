@@ -106,9 +106,9 @@ else
   pip install -r requirements.txt -q
 fi
 
-if [ "$SKIP_RESTART" = false ] && command -v [PM2](https://pm2.keymetrics.io) &>/dev/null; then
+if [ "$SKIP_RESTART" = false ] && command -v pm2 &>/dev/null; then
   echo "Restarting pm2 processes..."
-  pm2 restart all -q || true
+  pm2 restart all 2>/dev/null || true
   echo "   Done."
 fi
 
