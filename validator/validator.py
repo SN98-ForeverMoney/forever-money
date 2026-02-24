@@ -178,6 +178,13 @@ async def run_jobs_validator(config):
     wallet = bt.Wallet(**wallet_kwargs)
     subtensor = bt.Subtensor(network=config["subtensor_network"])
     metagraph = subtensor.metagraph(netuid=config["netuid"])
+    # Force sync from chain (Bittensor may otherwise serve cached metagraph from disk)
+    if hasattr(metagraph, "sync"):
+        try:
+            metagraph.sync()
+            logger.info("Metagraph synced from chain at startup.")
+        except Exception as e:
+            logger.warning("Metagraph sync at startup failed (using loaded state): %s", e)
     dendrite = bt.Dendrite(wallet=wallet)
 
     # Find validator's own UID (exclude from miner queries to avoid self-query)
@@ -321,18 +328,27 @@ async def run_jobs_validator(config):
         while True:
             try:
                 # Resync metagraph; if any uid has a different hotkey (replacement), zero out that miner
+                logger.debug("Metagraph resync: fetching latest...")
                 metagraph_new = subtensor.metagraph(netuid=config["netuid"])
+                if hasattr(metagraph_new, "sync"):
+                    try:
+                        metagraph_new.sync()
+                    except Exception as e:
+                        logger.debug("Metagraph sync in loop failed: %s", e)
                 replaced_uids = []
                 for uid in range(len(metagraph_new.hotkeys)):
                     prev = last_hotkeys.get(uid)
                     new_hk = metagraph_new.hotkeys[uid]
                     if prev is not None and prev != new_hk:
                         replaced_uids.append((uid, prev, new_hk))
-                for uid, _prev_hk, _new_hk in replaced_uids:
-                    await job_repository.zero_out_miner(uid)
-                    logger.info(
-                        f"Hotkey replaced at uid={uid}: zeroed out DB data (old hotkey removed)"
-                    )
+                if replaced_uids:
+                    for uid, _prev_hk, _new_hk in replaced_uids:
+                        await job_repository.zero_out_miner(uid)
+                        logger.info(
+                            f"Hotkey replaced at uid={uid}: zeroed out DB data (old hotkey removed)"
+                        )
+                else:
+                    logger.info("Metagraph resync: no hotkey changes.")
                 # Update snapshot and shared metagraph reference
                 for uid in range(len(metagraph_new.hotkeys)):
                     last_hotkeys[uid] = metagraph_new.hotkeys[uid]
