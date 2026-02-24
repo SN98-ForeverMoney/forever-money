@@ -243,6 +243,11 @@ async def run_jobs_validator(config):
     # Track running jobs and their tasks
     running_jobs = {}  # job_id -> task
 
+    # Snapshot of uid -> hotkey for detecting replacements (resync metagraph when changed)
+    last_hotkeys: dict[int, str] = {
+        uid: metagraph.hotkeys[uid] for uid in range(len(metagraph.hotkeys))
+    }
+
     logger.info("=" * 80)
     logger.info("Starting continuous job execution with dynamic job discovery...")
     logger.info("=" * 80)
@@ -310,11 +315,30 @@ async def run_jobs_validator(config):
                 await asyncio.sleep(check_interval)
 
     async def monitor_and_set_weights():
-        """Continuously calculate and set weights."""
+        """Continuously calculate and set weights. Resyncs metagraph and zeroes out replaced hotkeys."""
         weight_set_interval = 1200  # 20 mins
 
         while True:
             try:
+                # Resync metagraph; if any uid has a different hotkey (replacement), zero out that miner
+                metagraph_new = subtensor.metagraph(netuid=config["netuid"])
+                replaced_uids = []
+                for uid in range(len(metagraph_new.hotkeys)):
+                    prev = last_hotkeys.get(uid)
+                    new_hk = metagraph_new.hotkeys[uid]
+                    if prev is not None and prev != new_hk:
+                        replaced_uids.append((uid, prev, new_hk))
+                for uid, _prev_hk, _new_hk in replaced_uids:
+                    await job_repository.zero_out_miner(uid)
+                    logger.info(
+                        f"Hotkey replaced at uid={uid}: zeroed out DB data (old hotkey removed)"
+                    )
+                # Update snapshot and shared metagraph reference
+                for uid in range(len(metagraph_new.hotkeys)):
+                    last_hotkeys[uid] = metagraph_new.hotkeys[uid]
+                orchestrator.metagraph = metagraph_new
+                emissions_service.metagraph = metagraph_new
+
                 logger.info("Running weight setting cycle...")
                 await emissions_service.set_weights_on_chain(wallet, config["netuid"])
                 await asyncio.sleep(weight_set_interval)
