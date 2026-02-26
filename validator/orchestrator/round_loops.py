@@ -288,14 +288,10 @@ async def run_with_miners_batch_for_evaluation(
     metagraph,
     backtester,
     get_block_fn: Callable[[int], Any],
+    query_batch_size: int = 30,
 ) -> Dict[int, Dict[str, Any]]:
     """
     Run backtest for multiple miners with correct per-miner state.
-
-    At each rebalance step we query all miners in parallel (one dendrite call per
-    miner, each with that miner's own current_positions, current_inventory,
-    rebalances_so_far). So each miner receives the correct synapse (their own
-    state). Wall-clock time per step is ~one RTT because calls are concurrent.
 
     Returns:
         Dict mapping miner_uid -> result dict (accepted, score, rebalance_history, etc.)
@@ -358,9 +354,13 @@ async def run_with_miners_batch_for_evaluation(
                 )
 
             t0 = time.time()
-            query_results = await asyncio.gather(
-                *[query_one(uid) for uid in miner_uids]
-            )
+            query_results = []
+            for batch_start in range(0, len(miner_uids), query_batch_size):
+                batch_uids = miner_uids[batch_start : batch_start + query_batch_size]
+                batch_results = await asyncio.gather(
+                    *[query_one(uid) for uid in batch_uids]
+                )
+                query_results.extend(batch_results)
             elapsed_ms = int((time.time() - t0) * 1000)
             for uid in miner_uids:
                 per_miner_query_time_ms[uid] = per_miner_query_time_ms.get(uid, 0) + elapsed_ms
