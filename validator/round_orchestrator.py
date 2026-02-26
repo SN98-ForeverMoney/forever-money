@@ -36,7 +36,7 @@ from validator.orchestrator.winner import select_winner
 logger = logging.getLogger(__name__)
 
 # Max miners to evaluate concurrently per batch (avoids overload with many miners)
-EVALUATION_BATCH_SIZE = 30
+EVALUATION_BATCH_SIZE = 20
 
 
 class AsyncRoundOrchestrator:
@@ -335,10 +335,7 @@ class AsyncRoundOrchestrator:
         inventory: Inventory,
         liq_manager,
     ) -> Dict[int, Dict]:
-        """Evaluate all active miners via batched dendrite calls (up to 20 miners per batch)."""
-        batch_size = EVALUATION_BATCH_SIZE
-        scores: Dict[int, Dict] = {}
-
+        """Evaluate all active miners via batched dendrite calls (up to EVALUATION_BATCH_SIZE per batch)."""
         results = await run_with_miners_batch_for_evaluation(
             miner_uids=active_uids,
             job=job,
@@ -353,7 +350,7 @@ class AsyncRoundOrchestrator:
             metagraph=self.metagraph,
             backtester=self.backtester,
             get_block_fn=self._get_latest_block,
-            query_batch_size=batch_size,
+            query_batch_size=EVALUATION_BATCH_SIZE,
         )
         scores: Dict[int, Dict] = {}
         for uid, res in results.items():
