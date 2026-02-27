@@ -355,6 +355,7 @@ class AsyncRoundOrchestrator:
             get_block_fn=self._get_latest_block,
             query_batch_size=EVALUATION_BATCH_SIZE,
         )
+        scores: Dict[int, Dict] = {}
         for uid, res in results.items():
             score_val = res["score"] if res["accepted"] else 0.0
             scores[uid] = {
