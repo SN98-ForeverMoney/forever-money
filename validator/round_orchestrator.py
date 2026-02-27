@@ -164,15 +164,17 @@ class AsyncRoundOrchestrator:
             performance_data={"scores": {str(k): v["score"] for k, v in scores.items()}},
         )
         for uid, data in scores.items():
+            accepted = data["accepted"]
             await self.job_repository.update_miner_score(
                 job_id=job.job_id,
                 miner_uid=uid,
                 miner_hotkey=data["hotkey"],
                 evaluation_score=data["score"],
                 round_type=RoundType.EVALUATION,
+                accepted=accepted,
             )
             await self.job_repository.update_miner_participation(
-                job_id=job.job_id, miner_uid=uid, participated=True
+                job_id=job.job_id, miner_uid=uid, accepted=accepted
             )
         logger.info(f"Completed evaluation round {round_number}")
 
@@ -302,6 +304,7 @@ class AsyncRoundOrchestrator:
                     miner_hotkey=self.metagraph.hotkeys[winner_uid],
                     live_score=live_score,
                     round_type=RoundType.LIVE,
+                    accepted=True,
                 )
             await self.job_repository.save_rebalance_decision(
                 round_id=round_obj.round_id,
@@ -352,7 +355,6 @@ class AsyncRoundOrchestrator:
             get_block_fn=self._get_latest_block,
             query_batch_size=EVALUATION_BATCH_SIZE,
         )
-        scores: Dict[int, Dict] = {}
         for uid, res in results.items():
             score_val = res["score"] if res["accepted"] else 0.0
             scores[uid] = {
@@ -373,9 +375,6 @@ class AsyncRoundOrchestrator:
                     response_time_ms=res.get("total_query_time_ms", 0),
                 )
             else:
-                logger.info(
-                    f"Miner {uid} refused job: {res.get('refusal_reason')}"
-                )
                 await self.job_repository.save_rebalance_decision(
                     round_id=round_.round_id,
                     job_id=job.job_id,

@@ -221,6 +221,7 @@ class JobRepository:
         evaluation_score: Optional[float] = None,
         live_score: Optional[float] = None,
         round_type: RoundType = RoundType.EVALUATION,
+        accepted: Optional[bool] = None,
     ) -> MinerScore:
         """
         Update miner's reputation score for a job using EMA.
@@ -236,6 +237,8 @@ class JobRepository:
             evaluation_score: New evaluation score (if applicable)
             live_score: New live score (if applicable)
             round_type: Type of round that generated this score
+            accepted: If True, increment successful_evaluations (eval) or successful_live_rounds (live).
+                      If False (eval only), increment refusals. None = do not change those counters.
         """
         job = await Job.get(job_id=job_id)
 
@@ -270,8 +273,14 @@ class JobRepository:
         # Update counters
         if round_type == RoundType.EVALUATION:
             score.total_evaluations += 1
+            if accepted is True:
+                score.successful_evaluations += 1
+            elif accepted is False:
+                score.refusals += 1
         elif round_type == RoundType.LIVE:
             score.total_live_rounds += 1
+            if accepted is True:
+                score.successful_live_rounds += 1
 
         await score.save()
 
@@ -281,7 +290,7 @@ class JobRepository:
         return score
 
     async def update_miner_participation(
-        self, job_id: str, miner_uid: int, participated: bool
+        self, job_id: str, miner_uid: int, accepted: bool
     ):
         """
         Track daily participation for a miner on a job.
@@ -294,22 +303,23 @@ class JobRepository:
         Args:
             job_id: Job identifier
             miner_uid: Miner UID
-            participated: Whether miner participated
+            accepted: True if miner was running and accepted; False if refused/not running
         """
         job = await Job.get(job_id=job_id)
         today = date.today()
 
-        # Upsert participation record
         participation, created = await MinerParticipation.update_or_create(
             job=job,
             miner_uid=miner_uid,
             participation_date=today,
-            defaults={"participated": participated, "rounds_participated": 1},
+            defaults={},
         )
-
-        if not created:
+        if accepted:
             participation.rounds_participated += 1
-            await participation.save()
+        else:
+            participation.rounds_refused += 1
+        participation.participated = participation.rounds_participated > participation.rounds_refused
+        await participation.save()
 
         # Update eligibility
         score = await MinerScore.get_or_none(job=job, miner_uid=miner_uid)
@@ -318,27 +328,21 @@ class JobRepository:
             is_whitelisted = is_miner_whitelisted(score.miner_hotkey)
 
             if is_whitelisted:
-                logger.info(
-                    f"Miner {miner_uid} ({score.miner_hotkey}) is whitelisted"
-                )
                 score.is_eligible_for_live = True
             else:
-                # Count distinct days in last N days
+                # Count distinct days in last N days where miner participated (more than refused)
                 cutoff_date = today - timedelta(days=MINER_ELIGIBILITY_DAYS)
                 participation_count = await MinerParticipation.filter(
-                    job=job, miner_uid=miner_uid, participation_date__gte=cutoff_date
+                    job=job,
+                    miner_uid=miner_uid,
+                    participation_date__gte=cutoff_date,
+                    participated=True,
                 ).count()
 
                 score.participation_days = participation_count
                 score.is_eligible_for_live = participation_count >= MINER_ELIGIBILITY_DAYS
             
             await score.save()
-
-            if score.is_eligible_for_live:
-                logger.info(
-                    f"Miner {miner_uid} ({score.miner_hotkey}) is eligible for live execution"
-                )
-
 
     async def get_eligible_miners(
         self, job_id: str, min_score: float = 0.0
