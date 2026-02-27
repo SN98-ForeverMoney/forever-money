@@ -36,7 +36,7 @@ from validator.orchestrator.winner import select_winner
 logger = logging.getLogger(__name__)
 
 # Max miners to evaluate concurrently per batch (avoids overload with many miners)
-EVALUATION_BATCH_SIZE = 30
+EVALUATION_BATCH_SIZE = 20
 
 
 class AsyncRoundOrchestrator:
@@ -164,15 +164,17 @@ class AsyncRoundOrchestrator:
             performance_data={"scores": {str(k): v["score"] for k, v in scores.items()}},
         )
         for uid, data in scores.items():
+            accepted = data["accepted"]
             await self.job_repository.update_miner_score(
                 job_id=job.job_id,
                 miner_uid=uid,
                 miner_hotkey=data["hotkey"],
                 evaluation_score=data["score"],
                 round_type=RoundType.EVALUATION,
+                accepted=accepted,
             )
             await self.job_repository.update_miner_participation(
-                job_id=job.job_id, miner_uid=uid, participated=True
+                job_id=job.job_id, miner_uid=uid, accepted=accepted
             )
         logger.info(f"Completed evaluation round {round_number}")
 
@@ -302,6 +304,7 @@ class AsyncRoundOrchestrator:
                     miner_hotkey=self.metagraph.hotkeys[winner_uid],
                     live_score=live_score,
                     round_type=RoundType.LIVE,
+                    accepted=True,
                 )
             await self.job_repository.save_rebalance_decision(
                 round_id=round_obj.round_id,
@@ -335,10 +338,7 @@ class AsyncRoundOrchestrator:
         inventory: Inventory,
         liq_manager,
     ) -> Dict[int, Dict]:
-        """Evaluate all active miners via batched dendrite calls (up to 20 miners per batch)."""
-        batch_size = EVALUATION_BATCH_SIZE
-        scores: Dict[int, Dict] = {}
-
+        """Evaluate all active miners via batched dendrite calls (up to EVALUATION_BATCH_SIZE per batch)."""
         results = await run_with_miners_batch_for_evaluation(
             miner_uids=active_uids,
             job=job,
@@ -353,7 +353,7 @@ class AsyncRoundOrchestrator:
             metagraph=self.metagraph,
             backtester=self.backtester,
             get_block_fn=self._get_latest_block,
-            query_batch_size=batch_size,
+            query_batch_size=EVALUATION_BATCH_SIZE,
         )
         scores: Dict[int, Dict] = {}
         for uid, res in results.items():
@@ -376,9 +376,6 @@ class AsyncRoundOrchestrator:
                     response_time_ms=res.get("total_query_time_ms", 0),
                 )
             else:
-                logger.info(
-                    f"Miner {uid} refused job: {res.get('refusal_reason')}"
-                )
                 await self.job_repository.save_rebalance_decision(
                     round_id=round_.round_id,
                     job_id=job.job_id,

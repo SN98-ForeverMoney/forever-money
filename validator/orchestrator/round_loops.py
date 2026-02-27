@@ -499,8 +499,8 @@ async def run_with_miners_batch_for_evaluation(
     if len(accepted_uids) > 5:
         scores_str += f", ... ({len(accepted_uids)} total)"
     logger.info(
-        f"[ROUND={round_.round_id}] Parallel evaluation done: "
-        f"accepted={len(accepted_uids)}, refused={refused_count}, scores=[{scores_str}]"
+        f"[ROUND={round_.round_id}] Evaluation done: "
+        f"accepted={len(accepted_uids)}, refused={refused_count}, running miners: {accepted_uids}, scores=[{scores_str}]"
     )
     return results
 
