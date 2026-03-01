@@ -36,7 +36,7 @@ from validator.orchestrator.winner import select_winner
 logger = logging.getLogger(__name__)
 
 # Max miners to evaluate concurrently per batch (avoids overload with many miners)
-EVALUATION_BATCH_SIZE = 20
+EVALUATION_BATCH_SIZE = 51
 
 
 class AsyncRoundOrchestrator:
@@ -163,10 +163,14 @@ class AsyncRoundOrchestrator:
             winner_uid=winner["miner_uid"] if winner else None,
             performance_data={"scores": {str(k): v["score"] for k, v in scores.items()}},
         )
-        for uid, data in scores.items():
+        # Run score + participation updates in parallel batches to reduce DB latency
+        job_id = job.job_id
+        items = list(scores.items())
+
+        async def _update_one(uid: int, data: dict) -> None:
             accepted = data["accepted"]
             await self.job_repository.update_miner_score(
-                job_id=job.job_id,
+                job_id=job_id,
                 miner_uid=uid,
                 miner_hotkey=data["hotkey"],
                 evaluation_score=data["score"],
@@ -174,7 +178,13 @@ class AsyncRoundOrchestrator:
                 accepted=accepted,
             )
             await self.job_repository.update_miner_participation(
-                job_id=job.job_id, miner_uid=uid, accepted=accepted
+                job_id=job_id, miner_uid=uid, accepted=accepted
+            )
+
+        for i in range(0, len(items), EVALUATION_BATCH_SIZE):
+            batch = items[i : i + EVALUATION_BATCH_SIZE]
+            await asyncio.gather(
+                *[_update_one(uid, data) for uid, data in batch]
             )
         logger.info(f"Completed evaluation round {round_number}")
 
@@ -364,10 +374,15 @@ class AsyncRoundOrchestrator:
                 "accepted": res["accepted"],
                 "result": res,
             }
+
+        round_id = round_.round_id
+        job_id = job.job_id
+
+        async def _save_one(uid: int, res: dict) -> None:
             if res["accepted"]:
                 await self.job_repository.save_rebalance_decision(
-                    round_id=round_.round_id,
-                    job_id=job.job_id,
+                    round_id=round_id,
+                    job_id=job_id,
                     miner_uid=uid,
                     miner_hotkey=self.metagraph.hotkeys[uid],
                     accepted=True,
@@ -377,8 +392,8 @@ class AsyncRoundOrchestrator:
                 )
             else:
                 await self.job_repository.save_rebalance_decision(
-                    round_id=round_.round_id,
-                    job_id=job.job_id,
+                    round_id=round_id,
+                    job_id=job_id,
                     miner_uid=uid,
                     miner_hotkey=self.metagraph.hotkeys[uid],
                     accepted=False,
@@ -386,4 +401,12 @@ class AsyncRoundOrchestrator:
                     refusal_reason=res.get("refusal_reason"),
                     response_time_ms=res.get("total_query_time_ms", 0),
                 )
+
+        items = list(results.items())
+        for i in range(0, len(items), EVALUATION_BATCH_SIZE):
+            batch = items[i : i + EVALUATION_BATCH_SIZE]
+            await asyncio.gather(
+                *[_save_one(uid, res) for uid, res in batch]
+            )
+
         return scores
