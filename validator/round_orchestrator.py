@@ -36,7 +36,9 @@ from validator.orchestrator.winner import select_winner
 logger = logging.getLogger(__name__)
 
 # Max miners to evaluate concurrently per batch (avoids overload with many miners)
-EVALUATION_BATCH_SIZE = 51
+EVALUATION_BATCH_SIZE = 20
+# Max concurrent DB score/participation updates (reduces evaluation round tail latency).
+SCORE_UPDATE_BATCH_SIZE = 51
 
 
 class AsyncRoundOrchestrator:
@@ -181,8 +183,8 @@ class AsyncRoundOrchestrator:
                 job_id=job_id, miner_uid=uid, accepted=accepted
             )
 
-        for i in range(0, len(items), EVALUATION_BATCH_SIZE):
-            batch = items[i : i + EVALUATION_BATCH_SIZE]
+        for i in range(0, len(items), SCORE_UPDATE_BATCH_SIZE):
+            batch = items[i : i + SCORE_UPDATE_BATCH_SIZE]
             await asyncio.gather(
                 *[_update_one(uid, data) for uid, data in batch]
             )
@@ -403,8 +405,8 @@ class AsyncRoundOrchestrator:
                 )
 
         items = list(results.items())
-        for i in range(0, len(items), EVALUATION_BATCH_SIZE):
-            batch = items[i : i + EVALUATION_BATCH_SIZE]
+        for i in range(0, len(items), SCORE_UPDATE_BATCH_SIZE):
+            batch = items[i : i + SCORE_UPDATE_BATCH_SIZE]
             await asyncio.gather(
                 *[_save_one(uid, res) for uid, res in batch]
             )
