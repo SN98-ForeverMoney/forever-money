@@ -40,8 +40,8 @@ class PriceService:
         56: "bsc",
     }
 
-    MAX_RETRIES = 5
-    RETRY_DELAY = 5
+    MAX_RETRIES = 10
+    RETRY_DELAY = 10
 
     @staticmethod
     async def _get_json(
