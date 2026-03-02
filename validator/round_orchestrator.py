@@ -32,6 +32,7 @@ from validator.orchestrator.round_loops import (
     run_with_miners_batch_for_evaluation,
 )
 from validator.orchestrator.winner import select_winner
+from validator.utils.whitelist import is_miner_whitelisted
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ class AsyncRoundOrchestrator:
         active_uids = [
             uid
             for uid in range(len(self.metagraph.S))
-            if my_uid is None or uid != my_uid
+            if (my_uid is None or uid != my_uid) and is_miner_whitelisted(self.metagraph.hotkeys[uid])
         ]
         if not active_uids:
             logger.warning("No active miners found.")
@@ -209,6 +210,7 @@ class AsyncRoundOrchestrator:
         eligible_uids = {
             s.miner_uid
             for s in await self.job_repository.get_eligible_miners(job.job_id)
+            if is_miner_whitelisted(s.miner_hotkey)
         }
         winner_uid = None
         for uid in ranking:
