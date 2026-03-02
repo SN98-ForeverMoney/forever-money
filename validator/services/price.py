@@ -1,7 +1,7 @@
 import aiohttp
 import asyncio
 import logging
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 import bittensor as bt
 
@@ -40,6 +40,41 @@ class PriceService:
         56: "bsc",
     }
 
+    MAX_RETRIES = 5
+    RETRY_DELAY = 5
+
+    @staticmethod
+    async def _get_json(
+        url: str, params: dict = None, timeout: float = 15
+    ) -> Tuple[int, Optional[dict]]:
+        """
+        GET request with automatic retry on 429 (rate limit).
+
+        Retries up to MAX_RETRIES times with RETRY_DELAY seconds between attempts.
+        Returns (status_code, json_data). json_data is None for non-200 responses.
+        """
+        for attempt in range(PriceService.MAX_RETRIES + 1):
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
+                ) as response:
+                    if response.status == 429:
+                        if attempt < PriceService.MAX_RETRIES:
+                            logger.warning(
+                                f"Rate limited (429) on {url}, retrying in "
+                                f"{PriceService.RETRY_DELAY}s "
+                                f"({attempt + 1}/{PriceService.MAX_RETRIES})"
+                            )
+                            await asyncio.sleep(PriceService.RETRY_DELAY)
+                            continue
+                        raise RuntimeError(
+                            f"Rate limited (429) after {PriceService.MAX_RETRIES} "
+                            f"retries for {url}"
+                        )
+                    if response.status == 200:
+                        return response.status, await response.json()
+                    return response.status, None
+
     @staticmethod
     @async_ttl_cache(ttl=2.0)
     async def get_tao_price_usd() -> float:
@@ -49,20 +84,18 @@ class PriceService:
         Returns:
             TAO price in USD, or 1.0 as fallback
         """
+        url = f"{PriceService.BASE_URL}/simple/price"
+        params = {
+            "ids": PriceService.COINGECKO_TAO_ID,
+            "vs_currencies": "usd",
+        }
         try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{PriceService.BASE_URL}/simple/price"
-                params = {
-                    "ids": PriceService.COINGECKO_TAO_ID,
-                    "vs_currencies": "usd",
-                }
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        tao_price = data.get(PriceService.COINGECKO_TAO_ID, {}).get("usd", 1.0)
-                        return float(tao_price)
-                    else:
-                        logger.warning(f"Coingecko API returned status {response.status}")
+            status, data = await PriceService._get_json(url, params=params, timeout=10)
+            if status == 200:
+                tao_price = data.get(PriceService.COINGECKO_TAO_ID, {}).get("usd", 1.0)
+                return float(tao_price)
+            else:
+                logger.warning(f"Coingecko API returned status {status}")
         except asyncio.TimeoutError:
             logger.warning("Timeout fetching TAO price from Coingecko")
         except Exception as e:
@@ -138,24 +171,20 @@ class PriceService:
         params = {"vs_currency": "usd", "days": "1"}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, params=params, timeout=aiohttp.ClientTimeout(total=15)
-                ) as response:
-                    if response.status == 404:
-                        logger.info(
-                            f"CoinGecko 404 for {token_address} on {platform}, "
-                            f"falling back to GeckoTerminal"
-                        )
-                        return await PriceService._get_token_price_geckoterminal(
-                            addr, chain_id
-                        )
-                    if response.status != 200:
-                        raise RuntimeError(
-                            f"CoinGecko returned status {response.status} "
-                            f"for {token_address} on {platform}"
-                        )
-                    data = await response.json()
+            status, data = await PriceService._get_json(url, params=params)
+            if status == 404:
+                logger.info(
+                    f"CoinGecko 404 for {token_address} on {platform}, "
+                    f"falling back to GeckoTerminal"
+                )
+                return await PriceService._get_token_price_geckoterminal(
+                    addr, chain_id
+                )
+            if status != 200:
+                raise RuntimeError(
+                    f"CoinGecko returned status {status} "
+                    f"for {token_address} on {platform}"
+                )
         except asyncio.TimeoutError as e:
             logger.warning(
                 f"Timeout fetching token price for {token_address} (chain_id={chain_id})"
@@ -202,16 +231,12 @@ class PriceService:
         )
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=15)
-                ) as response:
-                    if response.status != 200:
-                        raise RuntimeError(
-                            f"GeckoTerminal returned status {response.status} "
-                            f"for {token_address} on {network}"
-                        )
-                    data = await response.json()
+            status, data = await PriceService._get_json(url)
+            if status != 200:
+                raise RuntimeError(
+                    f"GeckoTerminal returned status {status} "
+                    f"for {token_address} on {network}"
+                )
         except asyncio.TimeoutError as e:
             raise RuntimeError(
                 f"Timeout fetching token price from GeckoTerminal "
