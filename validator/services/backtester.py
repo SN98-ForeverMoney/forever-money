@@ -145,7 +145,7 @@ class BacktesterService:
         total_fees1 = 0.0
         in_range_count = 0
         total_swaps = len(swap_events)
-
+        logger.info(f"Got {total_swaps} swaps for pair {pair_address}.")
         # Simulate each swap for fee accumulation
         for event in swap_events:
             # Calculate price from sqrt_price_x96 if available
