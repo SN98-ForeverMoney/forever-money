@@ -381,7 +381,7 @@ async def run_with_miners_batch_for_evaluation(
                         else "Timeout or error"
                     )
                     per_miner_refused[uid] = reason
-                    logger.info(f"Miner {uid} refused or failed: {reason}")
+                    logger.info(f"Miner {uid} refused or failed for job {job.job_id} (pair={job.pair_address}): {reason}")
                     continue
                 if response.desired_positions is None:
                     per_miner_refused[uid] = "Miner not running"
