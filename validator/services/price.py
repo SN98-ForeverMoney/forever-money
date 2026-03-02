@@ -1,8 +1,11 @@
 import aiohttp
+import asyncio
 import logging
 from typing import Dict
+
 import bittensor as bt
-import asyncio
+
+from validator.utils.cache import async_ttl_cache
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,7 @@ class PriceService:
     }
 
     @staticmethod
+    @async_ttl_cache(ttl=2.0)
     async def get_tao_price_usd() -> float:
         """
         Get current price of TAO (Bittensor) token in USD from Coingecko.
@@ -65,6 +69,7 @@ class PriceService:
             logger.error(f"Failed to fetch TAO price: {e}")
 
     @staticmethod
+    @async_ttl_cache(ttl=2.0)
     async def get_alpha_price_tao(subtensor: bt.Subtensor, netuid: int) -> float:
         """
         Get Alpha price in TAO (how many TAO per 1 Alpha).
@@ -82,6 +87,7 @@ class PriceService:
             logger.error(f"Failed to fetch Alpha price (TAO): {e}")
 
     @staticmethod
+    @async_ttl_cache(ttl=2.0)
     async def get_alpha_price_usd(subtensor: bt.Subtensor, netuid: int) -> float:
         """
         Get Alpha price in USD using tao_price_usd and alpha_price_tao.
@@ -101,6 +107,7 @@ class PriceService:
             logger.error(f"Failed to fetch Alpha price (USD): {e}")
 
     @staticmethod
+    @async_ttl_cache(ttl=2.0)
     async def get_token_price(token_address: str, chain_id: int = 8453) -> float:
         """
         Get current token price in USD from CoinGecko.
