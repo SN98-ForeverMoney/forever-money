@@ -25,6 +25,18 @@ class PriceService:
         56: "binance-smart-chain",
     }
 
+    # GeckoTerminal network names by chain_id (fallback when CoinGecko returns 404)
+    GECKOTERMINAL_BASE_URL = "https://api.geckoterminal.com/api/v2"
+    CHAIN_ID_TO_NETWORK: Dict[int, str] = {
+        1: "eth",
+        8453: "base",
+        137: "polygon_pos",
+        42161: "arbitrum",
+        10: "optimism",
+        43114: "avax",
+        56: "bsc",
+    }
+
     @staticmethod
     async def get_tao_price_usd() -> float:
         """
@@ -123,6 +135,14 @@ class PriceService:
                 async with session.get(
                     url, params=params, timeout=aiohttp.ClientTimeout(total=15)
                 ) as response:
+                    if response.status == 404:
+                        logger.info(
+                            f"CoinGecko 404 for {token_address} on {platform}, "
+                            f"falling back to GeckoTerminal"
+                        )
+                        return await PriceService._get_token_price_geckoterminal(
+                            addr, chain_id
+                        )
                     if response.status != 200:
                         raise RuntimeError(
                             f"CoinGecko returned status {response.status} "
@@ -153,3 +173,61 @@ class PriceService:
         prices.sort(key=lambda p: p[0])
         _, last_price = prices[-1]
         return float(last_price)
+
+    @staticmethod
+    async def _get_token_price_geckoterminal(token_address: str, chain_id: int) -> float:
+        """
+        Fallback: get token price in USD from GeckoTerminal.
+
+        Raises:
+            ValueError: If chain_id has no GeckoTerminal network mapping.
+            RuntimeError: On fetch failure or missing price data.
+        """
+        network = PriceService.CHAIN_ID_TO_NETWORK.get(chain_id)
+        if not network:
+            raise ValueError(
+                f"chain_id={chain_id} not in CHAIN_ID_TO_NETWORK"
+            )
+
+        url = (
+            f"{PriceService.GECKOTERMINAL_BASE_URL}/simple/networks/{network}"
+            f"/token_price/{token_address}"
+        )
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=15)
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"GeckoTerminal returned status {response.status} "
+                            f"for {token_address} on {network}"
+                        )
+                    data = await response.json()
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"Timeout fetching token price from GeckoTerminal "
+                f"for {token_address} (chain_id={chain_id})"
+            ) from e
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Failed to fetch token price from GeckoTerminal "
+                f"for {token_address}: {e}"
+            )
+            raise
+
+        token_prices = (
+            data.get("data", {})
+            .get("attributes", {})
+            .get("token_prices", {})
+        )
+        price_str = token_prices.get(token_address)
+        if not price_str:
+            raise RuntimeError(
+                f"No price returned from GeckoTerminal for {token_address} on {network}"
+            )
+
+        return float(price_str)
