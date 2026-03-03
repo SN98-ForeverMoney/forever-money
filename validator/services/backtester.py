@@ -152,6 +152,8 @@ class BacktesterService:
             # Calculate price from sqrt_price_x96 if available
             sqrt_price_x96 = int(event.get("sqrt_price_x96"))
             block_number = int(event.get("evt_block_number"))
+            if block_number is None:
+                continue
             positions = get_deployed_positions(block_number)
             total_in_range_liq = 0
             for position in positions:
@@ -206,6 +208,14 @@ class BacktesterService:
         initial_sqrt_price_x96 = await self.db.get_sqrt_price_at_block(
             pair_address, start_block
         )
+        if final_sqrt_price_x96 is None:
+            raise ValueError(
+                f"Cannot get sqrt price at end_block={end_block} for pair {pair_address}"
+            )
+        if initial_sqrt_price_x96 is None:
+            raise ValueError(
+                f"Cannot get sqrt price at start_block={start_block} for pair {pair_address}"
+            )
 
         # price in Q192 (token1/token0)
         final_price_x192 = (
