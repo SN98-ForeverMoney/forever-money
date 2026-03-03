@@ -206,6 +206,14 @@ class BacktesterService:
         initial_sqrt_price_x96 = await self.db.get_sqrt_price_at_block(
             pair_address, start_block
         )
+        if final_sqrt_price_x96 is None:
+            raise ValueError(
+                f"Cannot get sqrt price at end_block={end_block} for pair {pair_address}"
+            )
+        if initial_sqrt_price_x96 is None:
+            raise ValueError(
+                f"Cannot get sqrt price at start_block={start_block} for pair {pair_address}"
+            )
 
         # price in Q192 (token1/token0)
         final_price_x192 = (

@@ -81,10 +81,10 @@ class EmissionsService:
                 Caller should skip setting weights.
         """
         try:
-            revenue_usd = await self.get_vault_revenue_usd()
             alpha_price_usd = await PriceService.get_alpha_price_usd(
                 self.subtensor, self.netuid
             )
+            revenue_usd = await self.get_vault_revenue_usd()
 
             # Total subnet emissions per epoch (in Alpha)
             total_emission_alpha = float(sum(self.metagraph.emission))
