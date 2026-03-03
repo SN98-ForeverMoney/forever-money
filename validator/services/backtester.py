@@ -151,7 +151,7 @@ class BacktesterService:
             logger.debug(f"[{pair_address}] Simulating event {event}")
             # Calculate price from sqrt_price_x96 if available
             sqrt_price_x96 = int(event.get("sqrt_price_x96"))
-            block_number = int(event.get("evt_block_number"))
+            block_number = int(event.get("block_number"))
             positions = get_deployed_positions(block_number)
             total_in_range_liq = 0
             for position in positions:
