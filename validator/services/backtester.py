@@ -148,7 +148,8 @@ class BacktesterService:
         logger.info(f"Got {total_swaps} swaps for pair {pair_address}.")
         # Simulate each swap for fee accumulation
         for event in swap_events:
-            logger.debug(f"[{pair_address}] Simulating event {event}")
+            # TODO: make debug only
+            logger.info(f"[{pair_address}] Simulating event {event}")
             # Calculate price from sqrt_price_x96 if available
             sqrt_price_x96 = int(event.get("sqrt_price_x96"))
             block_number = int(event.get("block_number"))
