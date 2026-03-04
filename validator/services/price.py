@@ -28,7 +28,7 @@ class PriceService:
         56: "binance-smart-chain",
     }
 
-    # GeckoTerminal network names by chain_id (fallback when CoinGecko returns 404)
+    # GeckoTerminal network names by chain_id (fallback when CoinGecko returns 404/429)
     GECKOTERMINAL_BASE_URL = "https://api.geckoterminal.com/api/v2"
     CHAIN_ID_TO_NETWORK: Dict[int, str] = {
         1: "eth",
@@ -41,25 +41,32 @@ class PriceService:
     }
 
     MAX_RETRIES = 10
-    RETRY_DELAY = 10
+    RETRY_DELAY = 10  # seconds when 429 from CoinGecko
 
     @staticmethod
     async def _get_json(
-        url: str, params: dict = None, timeout: float = 15
+        url: str,
+        params: dict = None,
+        timeout: float = 15,
+        retry_on_429: bool = True,
     ) -> Tuple[int, Optional[dict]]:
         """
-        GET request with automatic retry on 429 (rate limit).
-
-        Retries up to MAX_RETRIES times with RETRY_DELAY seconds between attempts.
+        GET request.
+        retry_on_429=True: on 429, sleep RETRY_DELAY and retry up to MAX_RETRIES (use for CoinGecko).
+        retry_on_429=False: on 429, return (429, None) immediately (use for GeckoTerminal).
         Returns (status_code, json_data). json_data is None for non-200 responses.
         """
-        for attempt in range(PriceService.MAX_RETRIES + 1):
+        if retry_on_429:
+            max_attempts = PriceService.MAX_RETRIES + 1
+        else:
+            max_attempts = 1
+        for attempt in range(max_attempts):
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response:
                     if response.status == 429:
-                        if attempt < PriceService.MAX_RETRIES:
+                        if retry_on_429 and attempt < PriceService.MAX_RETRIES:
                             logger.warning(
                                 f"Rate limited (429) on {url}, retrying in "
                                 f"{PriceService.RETRY_DELAY}s "
@@ -67,19 +74,18 @@ class PriceService:
                             )
                             await asyncio.sleep(PriceService.RETRY_DELAY)
                             continue
-                        raise RuntimeError(
-                            f"Rate limited (429) after {PriceService.MAX_RETRIES} "
-                            f"retries for {url}"
-                        )
+                        return response.status, None
                     if response.status == 200:
                         return response.status, await response.json()
                     return response.status, None
+        return 429, None
 
     @staticmethod
     @async_ttl_cache(ttl=2.0)
     async def get_tao_price_usd() -> float:
         """
         Get current price of TAO (Bittensor) token in USD from Coingecko.
+        On 429, retries with delay. No GeckoTerminal (TAO is not contract-based).
 
         Returns:
             TAO price in USD, or 1.0 as fallback
@@ -90,7 +96,9 @@ class PriceService:
             "vs_currencies": "usd",
         }
         try:
-            status, data = await PriceService._get_json(url, params=params, timeout=10)
+            status, data = await PriceService._get_json(
+                url, params=params, timeout=10, retry_on_429=True
+            )
             if status == 200:
                 tao_price = data.get(PriceService.COINGECKO_TAO_ID, {}).get("usd", 1.0)
                 return float(tao_price)
@@ -134,7 +142,7 @@ class PriceService:
         try:
             tao_price_usd = await PriceService.get_tao_price_usd()
             alpha_price_tao = await PriceService.get_alpha_price_tao(subtensor, netuid)
-            alpha_price_usd = alpha_price_tao * tao_price_usd      
+            alpha_price_usd = alpha_price_tao * tao_price_usd
             return alpha_price_usd
         except Exception as e:
             logger.error(f"Failed to fetch Alpha price (USD): {e}")
@@ -148,7 +156,6 @@ class PriceService:
         Raises:
             ValueError: On invalid args (unknown chain_id, empty token_address).
             RuntimeError: On fetch failure (timeout, HTTP error, no prices).
-            Exception: Re-raised from underlying errors.
 
         Returns:
             Token price in USD.
@@ -170,50 +177,71 @@ class PriceService:
         )
         params = {"vs_currency": "usd", "days": "1"}
 
+        # 1) Try CoinGecko (retries on 429 with delay)
         try:
-            status, data = await PriceService._get_json(url, params=params)
-            if status == 404:
-                logger.info(
-                    f"CoinGecko 404 for {token_address} on {platform}, "
-                    f"falling back to GeckoTerminal"
-                )
-                return await PriceService._get_token_price_geckoterminal(
-                    addr, chain_id
-                )
-            if status != 200:
+            status, data = await PriceService._get_json(
+                url, params=params, retry_on_429=False
+            )
+            if status == 200:
+                prices = data.get("prices") or []
+                if not prices:
+                    raise RuntimeError(
+                        f"No prices returned for {token_address} on {platform}"
+                    )
+                prices.sort(key=lambda p: p[0])
+                _, last_price = prices[-1]
+                return float(last_price)
+            if status not in (404, 429):
                 raise RuntimeError(
                     f"CoinGecko returned status {status} "
                     f"for {token_address} on {platform}"
                 )
         except asyncio.TimeoutError as e:
-            logger.warning(
-                f"Timeout fetching token price for {token_address} (chain_id={chain_id})"
-            )
             raise RuntimeError(
                 f"Timeout fetching token price for {token_address} "
                 f"(chain_id={chain_id})"
             ) from e
         except (ValueError, RuntimeError):
             raise
-        except Exception as e:
-            logger.error(f"Failed to fetch token price for {token_address}: {e}")
-            raise
 
-        prices = data.get("prices") or []
-        if not prices:
-            raise RuntimeError(
-                f"No prices returned for {token_address} on {platform}"
-            )
+        # 2) 404 or 429 from CoinGecko → try GeckoTerminal (no delay, no retry on 429)
+        logger.info(
+            f"CoinGecko {status} for {token_address} on {platform}, "
+            f"trying GeckoTerminal"
+        )
+        try:
+            return await PriceService._get_token_price_geckoterminal(addr, chain_id)
+        except Exception:
+            pass
 
-        # prices = [[timestamp_ms, price], ...]; use latest (last) price
-        prices.sort(key=lambda p: p[0])
-        _, last_price = prices[-1]
-        return float(last_price)
+        # 3) GeckoTerminal failed → try CoinGecko again (with retry on 429)
+        logger.info(
+            f"GeckoTerminal failed for {token_address}, retrying CoinGecko"
+        )
+        status2, data2 = await PriceService._get_json(
+            url, params=params, retry_on_429=True
+        )
+        if status2 == 200:
+            prices = data2.get("prices") or []
+            if not prices:
+                raise RuntimeError(
+                    f"No prices returned for {token_address} on {platform}"
+                )
+            prices.sort(key=lambda p: p[0])
+            _, last_price = prices[-1]
+            return float(last_price)
+        raise RuntimeError(
+            f"Could not get token price for {token_address} "
+            f"(CoinGecko status={status2}, GeckoTerminal failed)"
+        )
 
     @staticmethod
-    async def _get_token_price_geckoterminal(token_address: str, chain_id: int) -> float:
+    async def _get_token_price_geckoterminal(
+        token_address: str, chain_id: int
+    ) -> float:
         """
-        Fallback: get token price in USD from GeckoTerminal.
+        Get token price in USD from GeckoTerminal.
+        Does not retry on 429 so caller can fall back to CoinGecko.
 
         Raises:
             ValueError: If chain_id has no GeckoTerminal network mapping.
@@ -230,26 +258,14 @@ class PriceService:
             f"/token_price/{token_address}"
         )
 
-        try:
-            status, data = await PriceService._get_json(url)
-            if status != 200:
-                raise RuntimeError(
-                    f"GeckoTerminal returned status {status} "
-                    f"for {token_address} on {network}"
-                )
-        except asyncio.TimeoutError as e:
+        status, data = await PriceService._get_json(
+            url, timeout=15, retry_on_429=False
+        )
+        if status != 200:
             raise RuntimeError(
-                f"Timeout fetching token price from GeckoTerminal "
-                f"for {token_address} (chain_id={chain_id})"
-            ) from e
-        except RuntimeError:
-            raise
-        except Exception as e:
-            logger.error(
-                f"Failed to fetch token price from GeckoTerminal "
-                f"for {token_address}: {e}"
+                f"GeckoTerminal returned status {status} "
+                f"for {token_address} on {network}"
             )
-            raise
 
         token_prices = (
             data.get("data", {})
@@ -261,5 +277,4 @@ class PriceService:
             raise RuntimeError(
                 f"No price returned from GeckoTerminal for {token_address} on {network}"
             )
-
         return float(price_str)

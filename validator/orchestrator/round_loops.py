@@ -233,14 +233,20 @@ async def run_with_miner_for_evaluation(
             await asyncio.sleep(1)
         current_block = await get_block_fn(job.chain_id)
 
-    performance_metrics = await backtester.evaluate_positions_performance(
-        job.pair_address,
-        rebalance_history,
-        start_block,
-        current_block,
-        initial_inventory,
-        job.fee_rate,
-    )
+    try:
+        performance_metrics = await backtester.evaluate_positions_performance(
+            job.pair_address,
+            rebalance_history,
+            start_block,
+            current_block,
+            initial_inventory,
+            job.fee_rate,
+        )
+    except ValueError as e:
+        logger.warning(
+            f"Backtest failed for miner {miner_uid} (no sqrt price data): {e}"
+        )
+        performance_metrics = {}
     iv = performance_metrics.get("initial_value")
     fv = performance_metrics.get("final_value")
     return_pct = (
@@ -466,14 +472,20 @@ async def run_with_miners_batch_for_evaluation(
                 "total_query_time_ms": per_miner_query_time_ms.get(uid, 0),
             }
             continue
-        performance_metrics = await backtester.evaluate_positions_performance(
-            job.pair_address,
-            history,
-            start_block,
-            current_block,
-            initial_inventory,
-            job.fee_rate,
-        )
+        try:
+            performance_metrics = await backtester.evaluate_positions_performance(
+                job.pair_address,
+                history,
+                start_block,
+                current_block,
+                initial_inventory,
+                job.fee_rate,
+            )
+        except ValueError as e:
+            logger.warning(
+                f"[ROUND={round_.round_id}] Backtest failed for miner {uid} (no sqrt price data): {e}."
+            )
+            raise
         miner_score_val = await Scorer.score_pol_strategy(metrics=performance_metrics)
         serialized_history = [_serialize_history_item(h) for h in history]
         serialized_metrics = _serialize_metrics(performance_metrics)
@@ -591,22 +603,7 @@ async def run_with_miner_for_live(
                     })
                     if exec_result["success"]:
                         rebalance_price = await liq_manager.get_current_price()
-                        total_a0, total_a1 = 0, 0
-                        for pos in response.desired_positions:
-                            _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
-                                pos.tick_lower,
-                                pos.tick_upper,
-                                rebalance_price,
-                                int(pos.allocation0),
-                                int(pos.allocation1),
-                            )
-                            total_a0 += a0
-                            total_a1 += a1
-                        amount_0_int = max(0, int(initial_inventory.amount0) - total_a0)
-                        amount_1_int = max(0, int(initial_inventory.amount1) - total_a1)
-                        current_inventory = Inventory(
-                            amount0=str(amount_0_int), amount1=str(amount_1_int)
-                        )
+                        current_inventory = await liq_manager.get_inventory()
                         rebalance_history.append({
                             "block": current_block,
                             "price": rebalance_price,
@@ -629,14 +626,20 @@ async def run_with_miner_for_live(
             await asyncio.sleep(1)
         current_block = await get_block_fn(job.chain_id)
 
-    performance_metrics = await backtester.evaluate_positions_performance(
-        job.pair_address,
-        rebalance_history,
-        start_block,
-        current_block,
-        initial_inventory,
-        job.fee_rate,
-    )
+    try:
+        performance_metrics = await backtester.evaluate_positions_performance(
+            job.pair_address,
+            rebalance_history,
+            start_block,
+            current_block,
+            initial_inventory,
+            job.fee_rate,
+        )
+    except ValueError as e:
+        logger.warning(
+            f"Live backtest failed for miner {miner_uid} (no sqrt price data): {e}"
+        )
+        performance_metrics = {}
     score = await Scorer.score_pol_strategy(metrics=performance_metrics)
     return {
         "accepted": True,

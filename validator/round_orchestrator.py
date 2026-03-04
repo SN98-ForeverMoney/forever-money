@@ -103,7 +103,7 @@ class AsyncRoundOrchestrator:
                 )
                 await asyncio.sleep(job.round_duration_seconds)
             except Exception as e:
-                logger.error(f"Error in job {job.job_id}: {e}", exc_info=True)
+                logger.error(f"Error in job {job.job_id}: {e}")
                 await asyncio.sleep(job.round_duration_seconds)
 
     async def run_evaluation_round(self, job: Job) -> None:
@@ -141,31 +141,40 @@ class AsyncRoundOrchestrator:
         initial_positions = await liq_manager.get_current_positions()
         logger.info(f"Loaded {len(initial_positions)} initial positions from on-chain")
 
-        scores = await self._evaluate_miners(
-            job=job,
-            round_=round_obj,
-            active_uids=active_uids,
-            initial_positions=initial_positions,
-            start_block=current_block,
-            inventory=inventory,
-            liq_manager=liq_manager,
-        )
-
-        winner = await select_winner(self.job_repository, job.job_id, scores)
-        if winner:
-            logger.info(
-                f"Winner (evaluation round #{round_number}, job {job.job_id}): "
-                f"Miner UID={winner['miner_uid']}, score={winner['score']:.4f}, "
-                f"hotkey={winner['hotkey']}"
+        try:
+            scores = await self._evaluate_miners(
+                job=job,
+                round_=round_obj,
+                active_uids=active_uids,
+                initial_positions=initial_positions,
+                start_block=current_block,
+                inventory=inventory,
+                liq_manager=liq_manager,
             )
-        else:
-            logger.warning(f"No winner for evaluation round {round_number}")
 
-        await self.job_repository.complete_round(
-            round_id=round_obj.round_id,
-            winner_uid=winner["miner_uid"] if winner else None,
-            performance_data={"scores": {str(k): v["score"] for k, v in scores.items()}},
-        )
+            winner = await select_winner(self.job_repository, job.job_id, scores)
+            if winner:
+                logger.info(
+                    f"Winner (evaluation round #{round_number}, job {job.job_id}): "
+                    f"Miner UID={winner['miner_uid']}, score={winner['score']:.4f}, "
+                    f"hotkey={winner['hotkey']}"
+                )
+            else:
+                logger.warning(f"No winner for evaluation round {round_number}")
+
+            await self.job_repository.complete_round(
+                round_id=round_obj.round_id,
+                winner_uid=winner["miner_uid"] if winner else None,
+                performance_data={"scores": {str(k): v["score"] for k, v in scores.items()}},
+            )
+        except Exception as e:
+            logger.error(f"Evaluation round failed for job {job.job_id}: {e}")
+            await self.job_repository.complete_round(
+                round_id=round_obj.round_id,
+                winner_uid=None,
+                performance_data={"error": str(e)},
+            )
+            return
         # Run score + participation updates in parallel batches to reduce DB latency
         job_id = job.job_id
         items = list(scores.items())
