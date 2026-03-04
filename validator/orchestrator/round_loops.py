@@ -603,22 +603,7 @@ async def run_with_miner_for_live(
                     })
                     if exec_result["success"]:
                         rebalance_price = await liq_manager.get_current_price()
-                        total_a0, total_a1 = 0, 0
-                        for pos in response.desired_positions:
-                            _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
-                                pos.tick_lower,
-                                pos.tick_upper,
-                                rebalance_price,
-                                int(pos.allocation0),
-                                int(pos.allocation1),
-                            )
-                            total_a0 += a0
-                            total_a1 += a1
-                        amount_0_int = max(0, int(initial_inventory.amount0) - total_a0)
-                        amount_1_int = max(0, int(initial_inventory.amount1) - total_a1)
-                        current_inventory = Inventory(
-                            amount0=str(amount_0_int), amount1=str(amount_1_int)
-                        )
+                        current_inventory = await liq_manager.get_inventory()
                         rebalance_history.append({
                             "block": current_block,
                             "price": rebalance_price,
