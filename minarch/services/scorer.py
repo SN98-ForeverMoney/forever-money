@@ -1,3 +1,12 @@
+"""
+Strategy scoring for per-job competition.
+
+Design:
+- Primary signal: Net PnL vs HODL as **return** (final - initial) / initial.
+  No scaling — score is raw return (e.g. 0.05 for +5%). EMA and ranking use
+  relative values only; no other code depends on scale.
+"""
+
 from typing import Dict, Any
 
 DEFAULT_LOSS_PENALTY = 10.0
@@ -9,6 +18,12 @@ SCORE_MAX = 10.0
 
 
 class MinimalScorer:
+    """
+    Strategy scoring and winner ranking.
+
+    - score_pol_strategy: strategy score from backtest metrics.
+    """
+
     @staticmethod
     async def score_pol_strategy(
         metrics: Dict[str, Any],

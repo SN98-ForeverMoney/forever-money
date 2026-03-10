@@ -1,3 +1,15 @@
+"""
+Volatility-Band Miner
+
+This module implements a volatility-aware LP strategy that dynamically adjusts
+liquidity positions based on recent price movements.
+
+Key Features:
+- Maintains a single LP position
+- Rebalances when price drifts outside a volatility-defined band
+- Position width scales with both current tick and recent volatility
+"""
+
 import logging
 import math
 from dataclasses import dataclass
@@ -28,11 +40,21 @@ class Inventory:
 
 
 class MinimalMiner:
-    # Use a volatility-aware LP strategy that recenters liquidity when price drifts too far from the position center.
-    # LP range width and rebalance thresholds are determined using recent market volatility.
-    # Comparisons to miner v1
-    # fixed buffer rebalance trigger vs volatility band rebalance trigger
-    # simple volatility-scaled width vs full volatility-driven positioning logic
+    """
+    Volatility-Band Miner.
+
+    Maintains a single liquidity position that recenters when price drifts outside
+    a volatility-based band. The LP range width and rebalance thresholds are
+    derived from recent price volatility.
+
+    Attributes:
+        inventory (Inventory): Current inventory for LP positions
+        band_multiplier (float): Multiplier for price deviation to trigger rebalance
+        lp_width_multiplier (float): Multiplier to scale LP width
+        volatility_window (int): Number of recent prices used to compute volatility
+        min_volatility (float): Minimum volatility floor to avoid overly narrow positions
+    """
+
     def __init__(
         self,
         inventory: Inventory,
@@ -41,6 +63,16 @@ class MinimalMiner:
         volatility_window: int = 10,
         min_volatility: float = 0.001,
     ):
+        """
+        Initialize the miner with inventory and configuration.
+
+        Args:
+            inventory (Inventory): Initial token balances
+            band_multiplier (float, optional): Multiplier for volatility band
+            lp_width_multiplier (float, optional): Multiplier to scale LP width
+            volatility_window (int, optional): Number of recent prices for volatility
+            min_volatility (float, optional): Minimum volatility floor
+        """
         self.inventory = inventory
         self.positions: List[Position] = []
         self.band_multiplier = band_multiplier
@@ -56,6 +88,15 @@ class MinimalMiner:
         )
 
     def compute_volatility(self, recent_prices: List[float]) -> float:
+        """
+        Compute price volatility from recent prices.
+
+        Args:
+            recent_prices (List[float]): List of recent price ticks
+
+        Returns:
+            float: Standard deviation of relative price changes, floored by min_volatility
+        """
         if len(recent_prices) < self.volatility_window:
             return self.min_volatility
 
@@ -67,10 +108,25 @@ class MinimalMiner:
         variance = sum((x - mean) ** 2 for x in price_changes) / len(price_changes)
         return max(math.sqrt(variance), self.min_volatility)
 
-    # recent_prices -> used to determine the volatility factor
     def rebalance_query_handler(
         self, current_tick: int, tick_spacing: int, recent_prices: List[float]
     ):
+        """
+        Determine whether to rebalance and generate a new LP position.
+
+        Logic:
+        - If no positions exist, create initial position
+        - Rebalance if price deviates from current position center by more than a volatility band
+        - Position width is scaled by lp_width_multiplier
+
+        Args:
+            current_tick (int): Current market tick
+            tick_spacing (int): Minimum tick spacing for the pool
+            recent_prices (List[float]): List of recent ticks for volatility calculation
+
+        Returns:
+            List[Position]: Updated list of LP positions (single element)
+        """
         should_rebalance = False
 
         volatility = self.compute_volatility(recent_prices)

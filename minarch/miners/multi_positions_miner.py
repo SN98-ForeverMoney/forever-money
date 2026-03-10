@@ -1,3 +1,18 @@
+"""
+Multi-Position Miner (MinimalMiner)
+
+This module provides a volatility-aware, multi-position liquidity provision (LP) strategy
+for testing in the minarch_lab framework.
+
+Key Features:
+- Maintains two LP positions simultaneously:
+    1. Wide range (70% of inventory) -> lower risk, wider coverage
+    2. Tight range (30% of inventory) -> higher fee potential, more concentrated
+- Volatility-driven dynamic positioning
+- Automatic rebalance when price drifts outside buffer zones
+- Supports recent market price history for volatility calculation
+"""
+
 import logging
 import math
 from dataclasses import dataclass
@@ -28,14 +43,33 @@ class Inventory:
 
 
 class MinimalMiner:
-    # Use LP position where price ranges dynamically adjust based on recent market price changes (volatility)
-    # Uses 2 types of positions: Wide range (70% of inv) and Tight range (30% of inv)
+    """
+    Volatility-aware multi-position miner.
+
+    Maintains two positions (wide and tight) and rebalances automatically
+    based on market volatility and current tick location relative to position bounds.
+
+    Attributes:
+        inventory (Inventory): Current inventory for LP positions
+        positions (List[Position]): List of active positions (wide, tight)
+        width_factor (float): Multiplier for volatility to calculate wide range width
+        volatility_window (int): Number of recent price points used for volatility calculation
+    """
+
     def __init__(
         self,
         inventory: Inventory,
         width_factor: float = 3.0,
         volatility_window: int = 10,
     ):
+        """
+        Initialize the miner with inventory and configuration.
+
+        Args:
+            inventory (Inventory): Initial token balances
+            width_factor (float, optional): Multiplier for wide position width based on volatility
+            volatility_window (int, optional): Number of recent prices to compute volatility
+        """
         self.inventory = inventory
         self.positions: List[Position] = []
         self.width_factor = width_factor
@@ -45,6 +79,15 @@ class MinimalMiner:
         )
 
     def compute_volatility(self, recent_prices: List[float]) -> float:
+        """
+        Compute price volatility from recent prices.
+
+        Args:
+            recent_prices (List[float]): List of recent price ticks
+
+        Returns:
+            float: Standard deviation of relative price changes
+        """
         if len(recent_prices) < self.volatility_window:
             return 0.0
 
@@ -56,10 +99,26 @@ class MinimalMiner:
         variance = sum((x - mean) ** 2 for x in price_changes) / len(price_changes)
         return math.sqrt(variance)
 
-    # recent_prices -> used to determine the volatility factor
     def rebalance_query_handler(
         self, current_tick: int, tick_spacing: int, recent_prices: List[float]
     ):
+        """
+        Determine whether to rebalance and generate new LP positions.
+
+        Logic:
+        - Rebalance if no positions exist or price is within 20% of wide position edge
+        - Wide range uses 70% of inventory
+        - Tight range uses 30% of inventory
+        - Position widths are volatility-scaled
+
+        Args:
+            current_tick (int): Current market tick
+            tick_spacing (int): Minimum tick spacing for the pool
+            recent_prices (List[float]): List of recent ticks for volatility calculation
+
+        Returns:
+            List[Position]: Updated list of LP positions
+        """
         should_rebalance = False
 
         if not self.positions:

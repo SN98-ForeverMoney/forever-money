@@ -1,13 +1,35 @@
+"""
+Example entry point for running a liquidity strategy simulation using the minarch framework.
+
+This script demonstrates:
+- Loading swap event data
+- Initializing a miner strategy (volatility-aware, multi-position, or volatility-band)
+- Rebalancing LP positions based on market events based on the selected strategy
+- Running a minimal backtester
+- Scoring the strategy relative to a HODL baseline
+
+Notes:
+- Only one miner strategy import should be active at a time.
+- Outputs all logs to 'output.log'.
+"""
+
 import asyncio
 import logging
 import os
 import json
 from itertools import groupby
 from protocol.models import Inventory
-from v1.miners.miner1 import MinimalMiner
-from v1.data import MinimalData
-from v1.backtester import MinimalBacktester
-from v1.scorer import MinimalScorer
+
+# Volatility-aware single-position strategy
+from minarch.miners.volatility_miner import MinimalMiner
+
+# Volatility-band adaptive strategy
+# from minarch.miners.volatility_band_miner import MinimalMiner
+# Multi-position 70/30 strategy
+# from minarch.miners.multi_positions_miner import MinimalMiner
+from minarch.data.data import MinimalData
+from minarch.services.backtester import MinimalBacktester
+from minarch.services.scorer import MinimalScorer
 
 
 # Configure logging
@@ -44,21 +66,6 @@ rebalance_history = [
     }
 ]
 miner = MinimalMiner(inventory=initial_inventory, volatility_window=5)
-
-# for i, event in enumerate(swap_events):
-#     price = int(event["tick"])
-#     # for 0.3% tokens
-#     tick_spacing = 60.0
-#     recent_prices.append(price)
-#     pos = miner.rebalance_query_handler(price, tick_spacing, recent_prices)
-
-#     rebalance_history.append(
-#         {
-#             "block": event["evt_block_number"],
-#             "new_positions": pos,
-#             "inventory": initial_inventory,
-#         }
-#     )
 
 for block, events in groupby(swap_events, key=lambda x: x["evt_block_number"]):
     block_events = list(events)
