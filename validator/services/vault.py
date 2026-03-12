@@ -6,6 +6,7 @@ Handles business logic for miner-owned vault management including:
 - Balance checking and snapshot management
 - Eligibility filtering for evaluations
 """
+
 import logging
 from typing import List, Optional, Set
 from decimal import Decimal
@@ -15,7 +16,7 @@ from web3 import Web3
 
 from validator.repositories.vault import VaultRepository
 from validator.models.miner_vault import MinerVault, VaultSnapshot
-from validator.utils.env import MINIMUM_VAULT_BALANCE_USD
+from validator.utils.env import DEFAULT_MINIMUM_VAULT_BALANCE_USD
 from validator.utils.web3 import AsyncWeb3Helper, ZERO_ADDRESS
 from validator.utils.crypto import ss58_to_bytes32, is_valid_ss58
 from validator.services.price import PriceService
@@ -35,7 +36,7 @@ class VaultService:
         self,
         vault_repository: Optional[VaultRepository] = None,
         price_service: Optional[PriceService] = None,
-        default_minimum_usd: Decimal = MINIMUM_VAULT_BALANCE_USD,
+        default_minimum_usd: Decimal = DEFAULT_MINIMUM_VAULT_BALANCE_USD,
     ):
         """
         Initialize the vault service.
@@ -90,7 +91,9 @@ class VaultService:
             if is_associated:
                 await self.vault_repository.verify_vault(vault_address)
                 vault.is_verified = True
-                logger.info(f"Auto-verified vault {vault_address} for miner {miner_uid}")
+                logger.info(
+                    f"Auto-verified vault {vault_address} for miner {miner_uid}"
+                )
             else:
                 logger.warning(
                     f"Could not verify associatedMiner of vault {vault_address} for miner {miner_uid}"
@@ -136,7 +139,9 @@ class VaultService:
 
             # Normalize the expected hotkey for comparison
             # The hotkey could be SS58 format or already hex
-            expected_normalized = self._normalize_hotkey_to_bytes32(expected_miner_hotkey)
+            expected_normalized = self._normalize_hotkey_to_bytes32(
+                expected_miner_hotkey
+            )
 
             # Compare (case-insensitive)
             matches = associated_miner_hex.lower() == expected_normalized.lower()
@@ -154,7 +159,9 @@ class VaultService:
             return matches
 
         except Exception as e:
-            logger.error(f"Error verifying associatedMiner for vault {vault_address}: {e}")
+            logger.error(
+                f"Error verifying associatedMiner for vault {vault_address}: {e}"
+            )
             return False
 
     def _normalize_hotkey_to_bytes32(self, hotkey: str) -> str:
@@ -192,7 +199,7 @@ class VaultService:
             if all(c in "0123456789abcdefABCDEF" for c in hotkey):
                 # Pad or truncate to 32 bytes
                 hotkey_bytes = bytes.fromhex(hotkey)
-                padded = hotkey_bytes.ljust(32, b'\x00')[:32]
+                padded = hotkey_bytes.ljust(32, b"\x00")[:32]
                 return padded.hex()
         except Exception as e:
             logger.warning(f"Could not normalize hotkey {hotkey}: {e}")
@@ -299,7 +306,9 @@ class VaultService:
                     continue
 
             if ak_address is None:
-                logger.warning(f"No registered AK token found for vault {vault.vault_address}")
+                logger.warning(
+                    f"No registered AK token found for vault {vault.vault_address}"
+                )
                 return None
 
             # Get stashed token amounts
@@ -315,14 +324,18 @@ class VaultService:
 
             # Get current block
             if web3_helper.web3 is None:
-                logger.error("AsyncWeb3Helper.web3 is not initialized; cannot record vault snapshot")
+                logger.error(
+                    "AsyncWeb3Helper.web3 is not initialized; cannot record vault snapshot"
+                )
                 return None
             current_block = await web3_helper.web3.eth.block_number
 
             # Calculate USD value (simplified - in production use price service)
             total_value_usd = await self._calculate_vault_value_usd(
-                token0, token0_balance,
-                token1, token1_balance,
+                token0,
+                token0_balance,
+                token1,
+                token1_balance,
                 vault.chain_id,
             )
 
@@ -371,12 +384,24 @@ class VaultService:
         if self.price_service:
             try:
                 # Get prices from price service
-                price0 = await self.price_service.get_token_price(token0_address, chain_id)
-                price1 = await self.price_service.get_token_price(token1_address, chain_id)
+                price0 = await self.price_service.get_token_price(
+                    token0_address, chain_id
+                )
+                price1 = await self.price_service.get_token_price(
+                    token1_address, chain_id
+                )
 
                 # Assume 18 decimals for simplicity (should check actual decimals)
-                value0 = Decimal(str(token0_balance)) / Decimal("1e18") * Decimal(str(price0))
-                value1 = Decimal(str(token1_balance)) / Decimal("1e18") * Decimal(str(price1))
+                value0 = (
+                    Decimal(str(token0_balance))
+                    / Decimal("1e18")
+                    * Decimal(str(price0))
+                )
+                value1 = (
+                    Decimal(str(token1_balance))
+                    / Decimal("1e18")
+                    * Decimal(str(price1))
+                )
 
                 return value0 + value1
             except Exception as e:
@@ -491,10 +516,14 @@ class VaultService:
 
         # Get snapshot from lookback period
         lookback_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-        old_snapshot = await VaultSnapshot.filter(
-            vault=vault,
-            snapshot_at__lte=lookback_time,
-        ).order_by("-snapshot_at").first()
+        old_snapshot = (
+            await VaultSnapshot.filter(
+                vault=vault,
+                snapshot_at__lte=lookback_time,
+            )
+            .order_by("-snapshot_at")
+            .first()
+        )
 
         if old_snapshot is None:
             # No historical data, return neutral

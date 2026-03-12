@@ -4,13 +4,14 @@ Async Vault Repository for SN98 ForeverMoney Validator.
 Handles all database operations for miner-owned vaults.
 Uses Tortoise ORM - all methods are async.
 """
+
 import logging
 from typing import List, Optional
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from validator.models.miner_vault import MinerVault, VaultSnapshot
-from validator.utils.env import MINIMUM_VAULT_BALANCE_USD
+from validator.utils.env import DEFAULT_MINIMUM_VAULT_BALANCE_USD
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class VaultRepository:
         miner_hotkey: str,
         vault_address: str,
         chain_id: int = 8453,
-        minimum_balance_usd: Decimal = MINIMUM_VAULT_BALANCE_USD,
+        minimum_balance_usd: Decimal = DEFAULT_MINIMUM_VAULT_BALANCE_USD,
     ) -> MinerVault:
         """
         Register a new miner vault.
@@ -226,7 +227,9 @@ class VaultRepository:
             )
         return meets_minimum
 
-    async def get_eligible_miner_uids(self, minimum_usd: Optional[Decimal] = None) -> List[int]:
+    async def get_eligible_miner_uids(
+        self, minimum_usd: Optional[Decimal] = None
+    ) -> List[int]:
         """
         Get UIDs of all miners with verified vaults meeting minimum balance.
 
