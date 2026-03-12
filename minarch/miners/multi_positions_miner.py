@@ -17,6 +17,8 @@ import logging
 import math
 from dataclasses import dataclass
 from typing import List
+from collections import deque
+
 
 # Configure logging
 logging.basicConfig(
@@ -74,6 +76,7 @@ class MinimalMiner:
         self.positions: List[Position] = []
         self.width_factor = width_factor
         self.volatility_window = volatility_window
+        self.recent_prices = deque(maxlen=volatility_window)
         logger.info(
             f"Starting Miner V1 with inventory: {inventory}, width factor: {width_factor} and volatility window: {volatility_window}"
         )
@@ -99,9 +102,7 @@ class MinimalMiner:
         variance = sum((x - mean) ** 2 for x in price_changes) / len(price_changes)
         return math.sqrt(variance)
 
-    def rebalance_query_handler(
-        self, current_tick: int, tick_spacing: int, recent_prices: List[float]
-    ):
+    def rebalance_query_handler(self, current_tick: int, tick_spacing: int):
         """
         Determine whether to rebalance and generate new LP positions.
 
@@ -119,6 +120,8 @@ class MinimalMiner:
         Returns:
             List[Position]: Updated list of LP positions
         """
+        self.recent_prices.append(current_tick)
+
         should_rebalance = False
 
         if not self.positions:
@@ -134,12 +137,15 @@ class MinimalMiner:
                 should_rebalance = True
 
         if should_rebalance:
-            volatility = self.compute_volatility(recent_prices)
+            volatility = self.compute_volatility(self.recent_prices)
             logger.info(
-                f"Calculated volatility factor as {volatility} using recent prices: {recent_prices}"
+                f"Calculated volatility factor as {volatility} using recent prices: {self.recent_prices}"
             )
 
             width = volatility * self.width_factor
+            min_width = tick_spacing * 10
+            width = max(volatility * self.width_factor, min_width)
+
             tight_width = width * 0.3
 
             center_tick = (current_tick // tick_spacing) * tick_spacing
