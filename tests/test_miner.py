@@ -28,9 +28,18 @@ For testing without a local subtensor, you can use the validator's
         --dry-run
 """
 import sys
-import os
-# Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from pathlib import Path
+
+# Ensure project root on path when run standalone (e.g. python tests/test_miner.py or
+# python -m tests.test_miner). When run via pytest, conftest already calls
+# tests.common.ensure_project_root().
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from tests.common import ensure_project_root
+
+ensure_project_root()
 
 import bittensor as bt
 from protocol import StrategyRequest, Mode, Inventory

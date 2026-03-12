@@ -9,17 +9,24 @@ Supports:
 - Async/await with Tortoise ORM
 - Rebalance-only protocol
 """
+
 import argparse
 import asyncio
 import logging
+import os
 import sys
+
+# Ensure project root is in path when run as: python validator/validator.py
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import bittensor as bt
 
 from validator.repositories.job import JobRepository
+from validator.repositories.pool import PoolDataDB
 from validator.models.job import init_db, close_db
 from validator.round_orchestrator import AsyncRoundOrchestrator
 from validator.services.emissions import EmissionsService
+from validator.services.revenue import RevenueService
 from validator.utils.env import (
     NETUID,
     SUBTENSOR_NETWORK,
@@ -32,6 +39,9 @@ from validator.utils.env import (
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
     REQUIRE_VAULT_FOR_EVALUATION,
+    JOBS_POSTGRES_SCHEMA,
+    BT_WALLET_PATH,
+    MINER_ELIGIBILITY_DAYS,
 )
 
 # Configure logging
@@ -43,28 +53,87 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _is_set(value) -> bool:
+    """Return True if value is set and usable (not None, 'None', or empty string)."""
+    if value is None:
+        return False
+    s = str(value).strip()
+    return s not in ("", "None", "none")
+
+
+def validate_config(config: dict) -> None:
+    """
+    Validate required config after assembly. Exit with code 1 if any check fails.
+    Focus on DB and executor bot - the main external dependencies.
+    """
+    errors: list[str] = []
+
+    # Database: tortoise_db_url must be valid
+    db_url = config.get("tortoise_db_url") or ""
+    if not _is_set(db_url):
+        errors.append("Database URL not configured (JOBS_POSTGRES_* env vars)")
+    elif "postgres://" not in db_url and "postgresql://" not in db_url:
+        errors.append("Database URL must be postgres:// or postgresql://")
+
+    # Executor bot (required for live rounds)
+    url = config.get("executor_bot_url")
+    if not _is_set(url):
+        errors.append("EXECUTOR_BOT_URL must be set (e.g. http://localhost:8000)")
+    elif not (str(url).startswith("http://") or str(url).startswith("https://")):
+        errors.append("EXECUTOR_BOT_URL must start with http:// or https://")
+
+    if not _is_set(config.get("executor_bot_api_key")):
+        errors.append("EXECUTOR_BOT_API_KEY must be set")
+
+    if errors:
+        logger.error("Config validation failed:")
+        for e in errors:
+            logger.error(f"  - {e}")
+        logger.error("Please set required environment variables and restart.")
+        sys.exit(1)
+
+
 def get_config():
     """Load configuration from environment and arguments."""
     parser = argparse.ArgumentParser(description="SN98 ForeverMoney Validator")
 
     # Wallet arguments
-    parser.add_argument("--wallet.name", type=str, required=True, help="Wallet name")
     parser.add_argument(
-        "--wallet.hotkey", type=str, required=True, help="Wallet hotkey"
+        "--wallet.name", type=str, required=True, default="default", help="Wallet name"
+    )
+    parser.add_argument(
+        "--wallet.hotkey",
+        type=str,
+        required=True,
+        default="default",
+        help="Wallet hotkey",
+    )
+    parser.add_argument(
+        "--wallet.path",
+        type=str,
+        default=BT_WALLET_PATH,
+        help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)",
     )
 
     # Network arguments
     parser.add_argument(
         "--subtensor.network",
         type=str,
-        default=None,
+        default=SUBTENSOR_NETWORK,
         help=f"Subtensor network endpoint (e.g., ws://127.0.0.1:9944, wss://entrypoint-finney.opentensor.ai:443, or finney/test/local). Default: {SUBTENSOR_NETWORK}",
     )
     parser.add_argument(
         "--netuid",
         type=int,
-        default=None,
+        default=NETUID,
         help=f"Network UID. Default: {NETUID}",
+    )
+    parser.add_argument(
+        "--auto-update",
+        type=str,
+        default="true",
+        choices=("true", "false"),
+        help="Run auto-update script every 3600s to sync with subnet latest release. Default: true",
     )
 
     args = parser.parse_args()
@@ -75,16 +144,18 @@ def get_config():
         "subtensor_network": getattr(args, "subtensor.network") or SUBTENSOR_NETWORK,
         "wallet_name": getattr(args, "wallet.name"),
         "wallet_hotkey": getattr(args, "wallet.hotkey"),
+        "wallet_path": getattr(args, "wallet.path"),
         "executor_bot_url": EXECUTOR_BOT_URL,
         "executor_bot_api_key": EXECUTOR_BOT_API_KEY,
         "rebalance_check_interval": REBALANCE_CHECK_INTERVAL,
         "require_vault_for_evaluation": REQUIRE_VAULT_FOR_EVALUATION,
+        "auto_update": getattr(args, "auto_update", "true") == "true",
     }
 
     # Build Tortoise DB URL from environment
-    config[
-        "tortoise_db_url"
-    ] = f"postgres://{JOBS_POSTGRES_USER}:{JOBS_POSTGRES_PASSWORD}@{JOBS_POSTGRES_HOST}:{JOBS_POSTGRES_PORT}/{JOBS_POSTGRES_DB}"
+    config["tortoise_db_url"] = (
+        f"postgres://{JOBS_POSTGRES_USER}:{JOBS_POSTGRES_PASSWORD}@{JOBS_POSTGRES_HOST}:{JOBS_POSTGRES_PORT}/{JOBS_POSTGRES_DB}"
+    )
 
     return config
 
@@ -99,23 +170,58 @@ async def run_jobs_validator(config):
         config: Configuration dictionary
     """
     logger.info("=" * 80)
-    logger.info("STARTING SN98 VALIDATOR (ASYNC JOBS-BASED ARCHITECTURE)")
+    logger.info("STARTING FOREVERMONEY VALIDATOR (ASYNC JOBS-BASED ARCHITECTURE)")
     logger.info("=" * 80)
 
     # Initialize Bittensor components
-    wallet = bt.Wallet(name=config["wallet_name"], hotkey=config["wallet_hotkey"])
+    wallet_kwargs = {"name": config["wallet_name"], "hotkey": config["wallet_hotkey"]}
+    if config.get("wallet_path"):
+        wallet_kwargs["path"] = config["wallet_path"]
+    wallet = bt.Wallet(**wallet_kwargs)
     subtensor = bt.Subtensor(network=config["subtensor_network"])
     metagraph = subtensor.metagraph(netuid=config["netuid"])
+    # Force sync from chain (Bittensor may otherwise serve cached metagraph from disk)
+    if hasattr(metagraph, "sync"):
+        try:
+            metagraph.sync()
+            logger.info("Metagraph synced from chain at startup.")
+        except Exception as e:
+            logger.warning(
+                "Metagraph sync at startup failed (using loaded state): %s", e
+            )
     dendrite = bt.Dendrite(wallet=wallet)
+
+    # Find validator's own UID (exclude from miner queries to avoid self-query)
+    my_hotkey = wallet.hotkey.ss58_address
+    my_uid = None
+    for uid in range(len(metagraph.hotkeys)):
+        if metagraph.hotkeys[uid] == my_hotkey:
+            my_uid = uid
+            break
+    # Exit the process when the hotkey is not registered
+    if my_uid is None:
+        logger.error(
+            f"Hotkey {my_hotkey} is not registered on netuid {config['netuid']} (network: {config['subtensor_network']})"
+        )
+        logger.info("Exiting the process...")
+        sys.exit(1)
+
+    config["my_uid"] = my_uid
 
     logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
     logger.info(f"Network: {config['subtensor_network']}")
     logger.info(f"Netuid: {config['netuid']}")
+    logger.info(f"Validator UID: {my_uid}")
     logger.info(f"Protocol: Rebalance-only (no StrategyRequest)")
+    logger.info(f"Miner Eligibility period: {MINER_ELIGIBILITY_DAYS} day(s)")
 
     # Initialize Tortoise ORM
     logger.info("Initializing Tortoise ORM...")
-    await init_db(config["tortoise_db_url"])
+    db_schema = (
+        "validator" if config["subtensor_network"] == "test" else JOBS_POSTGRES_SCHEMA
+    )
+    logger.info(f"Using schema: {db_schema}")
+    await init_db(config["tortoise_db_url"], schema=db_schema)
     logger.info("Database connected")
 
     # Initialize async job manager
@@ -131,16 +237,31 @@ async def run_jobs_validator(config):
     )
     logger.info("Async round orchestrator initialized")
 
+    # Initialize pool data DB and revenue service
+    pool_data_db = PoolDataDB()
+    revenue_service = RevenueService(
+        job_repository=job_repository,
+        pool_data_db=pool_data_db,
+    )
+    logger.info("Revenue service initialized")
+
     # Initialize emissions service
     emissions_service = EmissionsService(
         metagraph=metagraph,
         subtensor=subtensor,
         job_repository=job_repository,
+        netuid=config["netuid"],
+        revenue_service=revenue_service,
     )
     logger.info("Emissions service initialized")
 
     # Track running jobs and their tasks
     running_jobs = {}  # job_id -> task
+
+    # Snapshot of uid -> hotkey for detecting replacements (resync metagraph when changed)
+    last_hotkeys: dict[int, str] = {
+        uid: metagraph.hotkeys[uid] for uid in range(len(metagraph.hotkeys))
+    }
 
     logger.info("=" * 80)
     logger.info("Starting continuous job execution with dynamic job discovery...")
@@ -148,9 +269,13 @@ async def run_jobs_validator(config):
 
     async def monitor_and_run_jobs():
         """Continuously monitor for new jobs and start them."""
-        check_interval = 60  # Check for new jobs every 60 seconds
+        check_interval = 900  # Check for new jobs every 15 minutes
 
         while True:
+
+            logger.info("-" * 80)
+            logger.info(f"Checking for new jobs...")
+
             try:
                 # Get all active jobs from database
                 active_jobs = await job_repository.get_active_jobs()
@@ -159,6 +284,7 @@ async def run_jobs_validator(config):
                     logger.warning(
                         "No active jobs found. Waiting for jobs to be added..."
                     )
+                    logger.info("-" * 80)
                     await asyncio.sleep(check_interval)
                     continue
 
@@ -167,7 +293,7 @@ async def run_jobs_validator(config):
                     if job.job_id not in running_jobs:
                         logger.info(
                             f"NEW JOB DETECTED: {job.job_id} | "
-                            f"Vault: {job.sn_liquditiy_manager_address} | "
+                            f"Vault: {job.sn_liquidity_manager_address} | "
                             f"Pair: {job.pair_address} | "
                             f"Round Duration: {job.round_duration_seconds}s"
                         )
@@ -179,22 +305,26 @@ async def run_jobs_validator(config):
                         )
                         running_jobs[job.job_id] = task
 
-                        logger.info(f"Started orchestration for job {job.job_id}")
+                        logger.info(f"Started orchestration for job '{job.job_id}'")
 
                 # Check for inactive jobs (jobs that were removed or deactivated)
                 current_job_ids = {job.job_id for job in active_jobs}
                 removed_jobs = set(running_jobs.keys()) - current_job_ids
 
                 for job_id in removed_jobs:
-                    logger.info(f"Job {job_id} is no longer active, cancelling task")
+                    logger.info(f"Job '{job_id}' is no longer active, cancelling task")
                     running_jobs[job_id].cancel()
                     del running_jobs[job_id]
 
                 # Log status
                 logger.info(
-                    f"Currently running {len(running_jobs)} jobs: {list(running_jobs.keys())}"
+                    f"Currently running {len(running_jobs)} job(s): {list(running_jobs.keys())}"
                 )
 
+                logger.info(
+                    f"Waiting for {check_interval} seconds before next check..."
+                )
+                logger.info("-" * 80)
                 await asyncio.sleep(check_interval)
 
             except Exception as e:
@@ -202,24 +332,99 @@ async def run_jobs_validator(config):
                 await asyncio.sleep(check_interval)
 
     async def monitor_and_set_weights():
-        """Continuously calculate and set weights."""
+        """Continuously calculate and set weights. Resyncs metagraph and zeroes out replaced hotkeys."""
         weight_set_interval = 1200  # 20 mins
-        
+
         while True:
             try:
+                # Resync metagraph; if any uid has a different hotkey (replacement), zero out that miner
+                logger.debug("Metagraph resync: fetching latest...")
+                metagraph_new = subtensor.metagraph(netuid=config["netuid"])
+                if hasattr(metagraph_new, "sync"):
+                    try:
+                        metagraph_new.sync()
+                    except Exception as e:
+                        logger.debug("Metagraph sync in loop failed: %s", e)
+                replaced_uids = []
+                for uid in range(len(metagraph_new.hotkeys)):
+                    prev = last_hotkeys.get(uid)
+                    new_hk = metagraph_new.hotkeys[uid]
+                    if prev is not None and prev != new_hk:
+                        replaced_uids.append((uid, prev, new_hk))
+                if replaced_uids:
+                    for uid, _prev_hk, _new_hk in replaced_uids:
+                        await job_repository.zero_out_miner(uid)
+                        logger.info(
+                            f"Hotkey replaced at uid={uid}: zeroed out DB data (old hotkey removed)"
+                        )
+                else:
+                    logger.info("Metagraph resync: no hotkey changes.")
+                # Update snapshot and shared metagraph reference
+                for uid in range(len(metagraph_new.hotkeys)):
+                    last_hotkeys[uid] = metagraph_new.hotkeys[uid]
+                orchestrator.metagraph = metagraph_new
+                emissions_service.metagraph = metagraph_new
+
                 logger.info("Running weight setting cycle...")
                 await emissions_service.set_weights_on_chain(wallet, config["netuid"])
                 await asyncio.sleep(weight_set_interval)
             except Exception as e:
-                logger.error(f"Error in weight setter: {e}", exc_info=True)
+                logger.error(f"Error in weight setter: {e}")
                 await asyncio.sleep(60)
 
-    try:
-        # Run the job monitor and weight setter concurrently
-        await asyncio.gather(
-            monitor_and_run_jobs(),
-            monitor_and_set_weights(),
+    AUTO_UPDATE_INTERVAL = 3600  # 1 hour
+
+    async def auto_update_loop():
+        """Run update script every 3600s (1 hour)."""
+        script_path = os.path.join(
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+            "scripts",
+            "update_to_latest.sh",
         )
+        if not os.path.isfile(script_path):
+            logger.warning("Auto-update enabled but script not found: %s", script_path)
+            return
+        while True:
+            await asyncio.sleep(AUTO_UPDATE_INTERVAL)
+            try:
+                logger.info("Running auto-update (sync with subnet latest release)...")
+                proc = await asyncio.create_subprocess_exec(
+                    "bash",
+                    script_path,
+                    cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    logger.info(
+                        "Auto-update completed successfully (pm2 may restart this process)."
+                    )
+                else:
+                    logger.warning(
+                        "Auto-update script exited with code %s: %s",
+                        proc.returncode,
+                        (stderr or stdout or b"").decode(errors="replace").strip()
+                        or "(no output)",
+                    )
+            except Exception as e:
+                logger.error("Auto-update failed: %s", e, exc_info=True)
+
+    tasks = [
+        monitor_and_run_jobs(),
+        monitor_and_set_weights(),
+    ]
+    if config.get("auto_update", True):
+        logger.info(
+            "Auto-update enabled: will run every %s seconds",
+            AUTO_UPDATE_INTERVAL,
+        )
+        tasks.append(auto_update_loop())
+    else:
+        logger.info("Auto-update disabled (use --auto-update true to enable).")
+
+    try:
+        await asyncio.gather(*tasks)
 
     except KeyboardInterrupt:
         logger.info("\n" + "=" * 80)
@@ -246,6 +451,7 @@ def main():
     """Main validator entry point."""
     try:
         config = get_config()
+        validate_config(config)
         asyncio.run(run_jobs_validator(config))
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)

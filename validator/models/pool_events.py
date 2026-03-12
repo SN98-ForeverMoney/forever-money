@@ -36,7 +36,7 @@ class SwapEvent(Model):
     recipient = fields.CharField(max_length=42)
 
     class Meta:
-        table = "swaps"
+        table = "base_poocl_swaps_v2"
         indexes = (("evt_address", "evt_block_number"),)
 
     def __str__(self):
@@ -68,7 +68,7 @@ class MintEvent(Model):
     sender = fields.CharField(max_length=42)
 
     class Meta:
-        table = "mints"
+        table = "base_poolcl_mints_v2"
         indexes = (("evt_address", "evt_block_number"),)
 
     def __str__(self):
@@ -99,7 +99,7 @@ class BurnEvent(Model):
     owner = fields.CharField(max_length=42)
 
     class Meta:
-        table = "burns"
+        table = "base_poolcl_burns_v2"
         indexes = (("evt_address", "evt_block_number"),)
 
     def __str__(self):
@@ -134,7 +134,7 @@ class CollectEvent(Model):
     recipient = fields.CharField(max_length=42)
 
     class Meta:
-        table = "collects"
+        table = "base_poolcl_collects_v2"
         indexes = (
             ("evt_address", "evt_block_number"),
             ("owner", "evt_block_number"),

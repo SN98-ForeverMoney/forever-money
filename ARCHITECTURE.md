@@ -43,7 +43,7 @@ A **Job** represents a liquidity management task for a specific vault and tradin
 ```python
 Job {
     job_id: str                           # Unique identifier
-    sn_liquditiy_manager_address: str     # Vault managing liquidity
+    sn_liquidity_manager_address: str     # Vault managing liquidity
     pair_address: str                     # Trading pair (e.g., ETH/USDC)
     target: str                           # What is the target of the job.
     chain_id: int                         # 8453 for Base

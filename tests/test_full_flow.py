@@ -8,6 +8,8 @@ Tests the complete validator-miner interaction including:
 - Miner scoring and winner selection
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -31,9 +33,13 @@ from validator.repositories.job import JobRepository
 
 from protocol import Inventory
 from protocol.synapses import VaultRegistrationQuery
+import unittest.mock as mock
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
+
+from tests.common import ensure_project_root
+
+ensure_project_root()
+
 logger = logging.getLogger(__name__)
 
 # Constants
@@ -53,12 +59,20 @@ async def start_miner(vault_address: str = None):
         env["MINER_VAULT_CHAIN_ID"] = "8453"
 
     cmd = [
-        sys.executable, "-u", "-m", "miner.miner",
-        "--wallet.name", "test_miner",
-        "--wallet.hotkey", "test_hotkey",
-        "--wallet.path", "./wallets",
-        "--axon.port", str(MINER_PORT),
-        "--subtensor.network", "test"  # Won't connect but needed for init
+        sys.executable,
+        "-u",
+        "-m",
+        "miner.miner",
+        "--wallet.name",
+        "test_miner",
+        "--wallet.hotkey",
+        "test_hotkey",
+        "--wallet.path",
+        "./wallets",
+        "--axon.port",
+        str(MINER_PORT),
+        "--subtensor.network",
+        "test",  # Won't connect but needed for init
     ]
 
     logger.info(f"Starting miner on port {MINER_PORT}...")
@@ -66,10 +80,7 @@ async def start_miner(vault_address: str = None):
         logger.info(f"Miner vault configured: {vault_address}")
 
     process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
     )
 
     # Wait for miner to start
@@ -82,13 +93,19 @@ def setup_wallets():
     os.makedirs("./wallets", exist_ok=True)
 
     # Validator wallet
-    val_wallet = bt.Wallet(name="test_validator", hotkey="test_validator_hotkey", path="./wallets")
-    val_wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False)
+    val_wallet = bt.Wallet(
+        name="test_validator", hotkey="test_validator_hotkey", path="./wallets"
+    )
+    val_wallet.create_if_non_existent(
+        coldkey_use_password=False, hotkey_use_password=False
+    )
     logger.info(f"Validator wallet ready: {val_wallet.hotkey.ss58_address}")
 
     # Miner wallet
     miner_wallet = bt.Wallet(name="test_miner", hotkey="test_hotkey", path="./wallets")
-    miner_wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False)
+    miner_wallet.create_if_non_existent(
+        coldkey_use_password=False, hotkey_use_password=False
+    )
     logger.info(f"Miner wallet ready: {miner_wallet.hotkey.ss58_address}")
     return val_wallet, miner_wallet
 
@@ -118,7 +135,7 @@ async def test_full_flow():
             port=MINER_PORT,
             ip_type=4,
             hotkey=miner_hotkey,
-            coldkey=miner_wallet.coldkeypub.ss58_address
+            coldkey=miner_wallet.coldkeypub.ss58_address,
         )
         metagraph.axons = [axon_info]
 
@@ -128,7 +145,9 @@ async def test_full_flow():
         # Init DB (InMemory) - include miner_vault models
         await Tortoise.init(
             db_url="sqlite://:memory:",
-            modules={"models": ["validator.models.job", "validator.models.miner_vault"]}
+            modules={
+                "models": ["validator.models.job", "validator.models.miner_vault"]
+            },
         )
         await Tortoise.generate_schemas(safe=True)
 
@@ -141,40 +160,54 @@ async def test_full_flow():
             pair_address="0x456",
             chain_id=8453,
             fee_rate=0.003,
-            round_duration_seconds=60
+            round_duration_seconds=60,
         )
 
         # Mock Dependencies for Orchestrator
-        with unittest.mock.patch("validator.round_orchestrator.SnLiqManagerService") as MockLiqManager, \
-             unittest.mock.patch("validator.round_orchestrator.PoolDataDB") as MockPoolDB, \
-             unittest.mock.patch("validator.round_orchestrator.AsyncWeb3Helper") as MockWeb3, \
-             unittest.mock.patch("validator.services.vault.AsyncWeb3Helper") as MockVaultWeb3:
+        with mock.patch(
+            "validator.round_orchestrator.SnLiqManagerService"
+        ) as MockLiqManager, mock.patch(
+            "validator.round_orchestrator.PoolDataDB"
+        ) as MockPoolDB, mock.patch(
+            "validator.round_orchestrator.AsyncWeb3Helper"
+        ) as MockWeb3, mock.patch(
+            "validator.services.vault.AsyncWeb3Helper"
+        ) as MockVaultWeb3:
 
             # Setup LiqManager Mock
             liq_instance = MockLiqManager.return_value
             liq_instance.get_inventory = AsyncMock(
-                return_value=Inventory(amount0="1000000000000000000", amount1="1000000000000000000")
+                return_value=Inventory(
+                    amount0="1000000000000000000", amount1="1000000000000000000"
+                )
             )
             liq_instance.get_current_positions = AsyncMock(return_value=[])
-            liq_instance.get_current_price = AsyncMock(return_value=79228162514264337593543950336)
+            liq_instance.get_current_price = AsyncMock(
+                return_value=79228162514264337593543950336
+            )
 
             # Setup PoolDB Mock
             db_instance = MockPoolDB.return_value
-            db_instance.get_swap_events = AsyncMock(return_value=[
-                {
-                    "evt_block_number": 250,
-                    "sqrt_price_x96": 79228162514264337593543950336,
-                    "amount0": 1000,
-                    "amount1": -1000,
-                    "liquidity": 1000000,
-                    "tick": 0
-                }
-            ])
-            db_instance.get_sqrt_price_at_block = AsyncMock(return_value=79228162514264337593543950336)
+            db_instance.get_swap_events = AsyncMock(
+                return_value=[
+                    {
+                        "evt_block_number": 250,
+                        "sqrt_price_x96": 79228162514264337593543950336,
+                        "amount0": 1000,
+                        "amount1": -1000,
+                        "liquidity": 1000000,
+                        "tick": 0,
+                    }
+                ]
+            )
+            db_instance.get_sqrt_price_at_block = AsyncMock(
+                return_value=79228162514264337593543950336
+            )
 
             # Setup Vault Web3 Mock for associatedMiner verification
             # Convert miner hotkey to bytes32 for mock response
             from validator.utils.crypto import ss58_to_bytes32
+
             miner_bytes32 = ss58_to_bytes32(miner_hotkey)
 
             mock_vault_contract = MagicMock()
@@ -183,7 +216,9 @@ async def test_full_flow():
             )
 
             mock_vault_web3_instance = MagicMock()
-            mock_vault_web3_instance.make_contract_by_name.return_value = mock_vault_contract
+            mock_vault_web3_instance.make_contract_by_name.return_value = (
+                mock_vault_contract
+            )
             MockVaultWeb3.make_web3.return_value = mock_vault_web3_instance
 
             # Initialize Orchestrator with vault requirement enabled
@@ -196,11 +231,13 @@ async def test_full_flow():
                 job_repository=job_repo,
                 dendrite=dendrite,
                 metagraph=metagraph,
-                config=config
+                config=config,
             )
 
             # Mock _get_latest_block for controlled progression
-            orchestrator._get_latest_block = AsyncMock(side_effect=[200, 210, 300] + [300] * 100)
+            orchestrator._get_latest_block = AsyncMock(
+                side_effect=[200, 210, 300] + [300] * 100
+            )
 
             # Initialize round numbers
             await orchestrator._initialize_round_numbers(job)
@@ -214,7 +251,9 @@ async def test_full_flow():
 
             # Verify no miners are registered yet
             registered_before = await MinerVault.all()
-            assert len(registered_before) == 0, "Expected no vaults registered initially"
+            assert (
+                len(registered_before) == 0
+            ), "Expected no vaults registered initially"
             logger.info("Verified: No vaults registered initially")
 
             # Run the registration check (this queries miners for their vault info)
@@ -222,13 +261,17 @@ async def test_full_flow():
 
             # Verify miner's vault was registered
             registered_after = await MinerVault.all()
-            assert len(registered_after) == 1, f"Expected 1 vault registered, got {len(registered_after)}"
+            assert (
+                len(registered_after) == 1
+            ), f"Expected 1 vault registered, got {len(registered_after)}"
 
             vault = registered_after[0]
             assert vault.miner_uid == 0
             assert vault.miner_hotkey == miner_hotkey
             assert vault.vault_address == TEST_VAULT_ADDRESS.lower()
-            assert vault.is_verified is True, "Vault should be verified (associatedMiner matched)"
+            assert (
+                vault.is_verified is True
+            ), "Vault should be verified (associatedMiner matched)"
             logger.info(f"Verified: Vault registered and verified for miner 0")
             logger.info(f"  Address: {vault.vault_address}")
             logger.info(f"  Verified: {vault.is_verified}")
@@ -252,6 +295,7 @@ async def test_full_flow():
 
             # Patch datetime to control loop duration
             from datetime import datetime, timedelta, timezone
+
             start_dt = datetime.now(timezone.utc)
 
             def dt_side_effect(tz=None):
@@ -259,7 +303,7 @@ async def test_full_flow():
                 start_dt += timedelta(seconds=15)
                 return start_dt
 
-            with unittest.mock.patch("validator.round_orchestrator.datetime") as mock_dt:
+            with mock.patch("validator.round_orchestrator.datetime") as mock_dt:
                 mock_dt.now.side_effect = dt_side_effect
                 mock_dt.timezone = timezone
 
@@ -275,6 +319,7 @@ async def test_full_flow():
 
             # Check if miner participated
             from validator.models.job import Prediction
+
             predictions = await Prediction.filter(round=r).all()
             assert len(predictions) >= 1, "Expected at least 1 prediction"
             logger.info(f"Miner participated with {len(predictions)} prediction(s)")
@@ -307,9 +352,8 @@ async def test_full_flow():
 
         # Clean up Tortoise
         try:
-            if Tortoise._inited:
-                await Tortoise.close_connections()
-        except Exception:
+            yield orchestrator, job
+        finally:
             pass
 
 
@@ -319,11 +363,19 @@ async def test_vault_registration_without_miner_vault():
     try:
         # Setup wallets
         os.makedirs("./wallets", exist_ok=True)
-        val_wallet = bt.Wallet(name="test_validator2", hotkey="test_validator_hotkey2", path="./wallets")
-        val_wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False)
+        val_wallet = bt.Wallet(
+            name="test_validator2", hotkey="test_validator_hotkey2", path="./wallets"
+        )
+        val_wallet.create_if_non_existent(
+            coldkey_use_password=False, hotkey_use_password=False
+        )
 
-        miner_wallet = bt.Wallet(name="test_miner2", hotkey="test_hotkey2", path="./wallets")
-        miner_wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False)
+        miner_wallet = bt.Wallet(
+            name="test_miner2", hotkey="test_hotkey2", path="./wallets"
+        )
+        miner_wallet.create_if_non_existent(
+            coldkey_use_password=False, hotkey_use_password=False
+        )
         miner_hotkey = miner_wallet.hotkey.ss58_address
 
         # Mock metagraph
@@ -339,7 +391,9 @@ async def test_vault_registration_without_miner_vault():
         # Init DB
         await Tortoise.init(
             db_url="sqlite://:memory:",
-            modules={"models": ["validator.models.job", "validator.models.miner_vault"]}
+            modules={
+                "models": ["validator.models.job", "validator.models.miner_vault"]
+            },
         )
         await Tortoise.generate_schemas(safe=True)
 
@@ -350,7 +404,7 @@ async def test_vault_registration_without_miner_vault():
             job_repository=job_repo,
             dendrite=dendrite,
             metagraph=metagraph,
-            config=config
+            config=config,
         )
 
         # Run registration check
@@ -375,8 +429,12 @@ async def test_vault_filtering_excludes_unregistered_miners():
     try:
         # Setup
         os.makedirs("./wallets", exist_ok=True)
-        val_wallet = bt.Wallet(name="test_validator3", hotkey="test_validator_hotkey3", path="./wallets")
-        val_wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False)
+        val_wallet = bt.Wallet(
+            name="test_validator3", hotkey="test_validator_hotkey3", path="./wallets"
+        )
+        val_wallet.create_if_non_existent(
+            coldkey_use_password=False, hotkey_use_password=False
+        )
 
         # Mock metagraph with 3 miners
         metagraph = MagicMock(spec=bt.Metagraph)
@@ -391,7 +449,9 @@ async def test_vault_filtering_excludes_unregistered_miners():
         # Init DB
         await Tortoise.init(
             db_url="sqlite://:memory:",
-            modules={"models": ["validator.models.job", "validator.models.miner_vault"]}
+            modules={
+                "models": ["validator.models.job", "validator.models.miner_vault"]
+            },
         )
         await Tortoise.generate_schemas(safe=True)
 
@@ -404,7 +464,7 @@ async def test_vault_filtering_excludes_unregistered_miners():
             pair_address="0x456",
             chain_id=8453,
             fee_rate=0.003,
-            round_duration_seconds=60
+            round_duration_seconds=60,
         )
 
         config = {"require_vault_for_evaluation": True}
@@ -412,7 +472,7 @@ async def test_vault_filtering_excludes_unregistered_miners():
             job_repository=job_repo,
             dendrite=dendrite,
             metagraph=metagraph,
-            config=config
+            config=config,
         )
 
         # Mock vault service to return empty eligible list
@@ -421,13 +481,17 @@ async def test_vault_filtering_excludes_unregistered_miners():
         await orchestrator._initialize_round_numbers(job)
 
         # Run evaluation round - should exit early due to no eligible miners
-        with unittest.mock.patch("validator.round_orchestrator.SnLiqManagerService"):
+        with mock.patch("validator.round_orchestrator.SnLiqManagerService"):
             await orchestrator.run_evaluation_round(job)
 
         # Verify no round was created (exited early)
         rounds = await Round.filter(job=job).all()
-        assert len(rounds) == 0, "No round should be created when no miners have eligible vaults"
-        logger.info("Verified: Evaluation round skipped when no miners have eligible vaults")
+        assert (
+            len(rounds) == 0
+        ), "No round should be created when no miners have eligible vaults"
+        logger.info(
+            "Verified: Evaluation round skipped when no miners have eligible vaults"
+        )
 
     finally:
         try:

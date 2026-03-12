@@ -1,22 +1,22 @@
-# Miner Registration Guide - Dev Network
+# Miner Registration Guide - Testnet
 
-This guide will help you get funds and register as a miner on the SN98 ForeverMoney subnet running at **3.142.51.152**.
+This guide will help you get funds and register as a miner on the SN98 ForeverMoney subnet running on **Bittensor Testnet**.
 
 > **⚠️ IMPORTANT NOTICE**
-> This is a development/test network and **may be restarted at any time**.
+> This is a test network.
 
 ## Prerequisites
 
 - `btcli` (Bittensor CLI) installed
-- Python 3.8+ with required dependencies
+- Python 3.11+ with required dependencies
 
 
 ## 💡 Pro Tip: Set Default Network
 
-To avoid typing `--network ws://3.21.33.121:9944` for every command, you can set it as your default:
+To avoid typing `--network test` for every command, you can set it as your default:
 
 ```bash
-btcli config set --network ws://3.21.33.121:9944
+btcli config set --network test
 ```
 
 Now you can run commands like `btcli wallet list` without the network flag!
@@ -42,43 +42,11 @@ btcli wallet list
 
 Note your **coldkey address** - you'll need this to receive TAO.
 
-## Step 2: Get TAO Funds
+## Step 2: Get Testnet TAO Funds
 
-You need TAO to register on the subnet. This dev network has a pre-funded **Alice** account with 1,000,000 TAO for testing.
+You need Testnet TAO to register on the subnet.
 
-**Recommended:** 1000 TAO for operations and staking
-
-### Option A: Transfer from Alice Wallet (Recommended for Dev Network)
-
-First, get access to the Alice wallet:
-
-```bash
-# Import Alice account (pre-funded with 1M TAO)
-btcli wallet create --uri alice
-
-# Verify Alice's balance
-btcli wallet balance \
-  --wallet.name alice
-```
-
-Now transfer TAO from Alice to your miner wallet:
-
-```bash
-# Get your miner's coldkey address first
-btcli wallet list
-
-# Transfer TAO from Alice to your miner
-btcli wallet transfer \
-  --wallet.name alice \
-  --destination <YOUR_MINER_COLDKEY_ADDRESS> \
-  --amount 1000
-```
-
-Replace `<YOUR_MINER_COLDKEY_ADDRESS>` with your coldkey address from `btcli wallet list`.
-
-### Option B: Request from Subnet Owner
-
-Alternatively, contact the subnet owner/administrator and provide them with your **coldkey address** from Step 1.
+You can request funds [here](https://app.minersunion.ai/testnet-faucet)
 
 ### Verify Your Balance
 
@@ -92,8 +60,8 @@ btcli wallet balance \
 ## Step 3: Verify Subnet Information
 
 The SN98 ForeverMoney subnet is configured as:
-- **Subnet Name**: `sn98-forever-money`
-- **NETUID**: `2`
+- **Subnet Name**: `forevermoney`
+- **NETUID**: `374`
 
 You can verify this by listing all subnets:
 
@@ -107,7 +75,7 @@ Register your miner hotkey to the subnet:
 
 ```bash
 btcli subnet register \
-  --netuid 2 \
+  --netuid 374 \
   --wallet.name my_miner \
   --hotkey default
 ```
@@ -124,7 +92,7 @@ Check that your miner is registered:
 
 ```bash
 btcli subnet show \
-  --netuid 2
+  --netuid 374
 ```
 
 You should see your hotkey listed with a UID (User ID).
@@ -158,6 +126,8 @@ cp .env.example .env
 nano .env
 ```
 
+Set `SUBTENSOR_NETWORK=test` and `NETUID=374` in your `.env` file.
+
 
 ## Step 7: Run Your Miner
 
@@ -167,12 +137,12 @@ Start your miner using Bittensor axon:
 python -m miner.miner \
   --wallet.name my_miner \
   --wallet.hotkey default \
-  --netuid 2 \
+  --netuid 374 \
   --axon.port 8091
 ```
 
 **Important flags:**
-- `--netuid 2` - SN98 ForeverMoney subnet ID
+- `--netuid 374` - SN98 ForeverMoney subnet ID
 - `--axon.port 8091` - Port for receiving validator queries (must be publicly accessible)
 
 ### Port Forwarding

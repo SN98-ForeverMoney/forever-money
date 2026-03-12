@@ -5,12 +5,19 @@ Fully async implementation using:
 - Tortoise ORM for database
 - RebalanceQuery-only protocol (no StrategyRequest)
 - Validator-generated initial positions
+
+Orchestration logic is split across validator.orchestrator:
+- round_loops: evaluation and live block loops
+- winner: winner selection and tie-breaking
+- miner_query: query miners for rebalance decisions
+- executor: execute strategy on-chain via executor bot
 """
+
 import logging
 import asyncio
+import time
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
-import time
 
 import bittensor as bt
 import requests
@@ -28,7 +35,19 @@ from validator.services.scorer import Scorer
 from validator.services.vault import VaultService
 import time as time_module
 
+from validator.orchestrator.round_loops import (
+    run_with_miner_for_live,
+    run_with_miners_batch_for_evaluation,
+)
+from validator.orchestrator.winner import select_winner
+from validator.utils.whitelist import is_miner_whitelisted
+
 logger = logging.getLogger(__name__)
+
+# Max miners to evaluate concurrently per batch (avoids overload with many miners)
+EVALUATION_BATCH_SIZE = 20
+# Max concurrent DB score/participation updates (reduces evaluation round tail latency).
+SCORE_UPDATE_BATCH_SIZE = 51
 
 
 class AsyncRoundOrchestrator:
@@ -45,30 +64,19 @@ class AsyncRoundOrchestrator:
         metagraph: bt.Metagraph,
         config: Dict,
     ):
-        """
-        Initialize the async round orchestrator.
-
-        Args:
-            job_repository: Async job manager instance
-            dendrite: Bittensor dendrite for querying miners
-            metagraph: Bittensor metagraph
-            config: Configuration dictionary
-        """
         self.job_repository = job_repository
         self.dendrite = dendrite
         self.metagraph = metagraph
         self.config = config
-
-        # Track round numbers per job
         self.round_numbers: Dict[str, Dict[str, int]] = {}
-
-        # Rebalance check frequency (every N blocks)
         self.rebalance_check_interval = config.get("rebalance_check_interval", 100)
         self.backtester = BacktesterService(PoolDataDB())
 
         # Vault service for miner eligibility filtering
         self.vault_service = VaultService()
-        self.require_vault_for_evaluation = config.get("require_vault_for_evaluation", False)
+        self.require_vault_for_evaluation = config.get(
+            "require_vault_for_evaluation", False
+        )
 
     async def _initialize_round_numbers(self, job: Job):
         """
@@ -80,23 +88,25 @@ class AsyncRoundOrchestrator:
         Args:
             job: Job to initialize round numbers for
         """
+
         # Get highest round number for evaluation rounds
-        eval_round = await Round.filter(
-            job=job,
-            round_type=RoundType.EVALUATION
-        ).order_by('-round_number').first()
 
-        # Get highest round number for live rounds
-        live_round = await Round.filter(
-            job=job,
-            round_type=RoundType.LIVE
-        ).order_by('-round_number').first()
-
+    async def _initialize_round_numbers(self, job: Job) -> None:
+        """Initialize round numbers from database for a job."""
+        eval_round = (
+            await Round.filter(job=job, round_type=RoundType.EVALUATION)
+            .order_by("-round_number")
+            .first()
+        )
+        live_round = (
+            await Round.filter(job=job, round_type=RoundType.LIVE)
+            .order_by("-round_number")
+            .first()
+        )
         self.round_numbers[job.job_id] = {
             "evaluation": eval_round.round_number if eval_round else 0,
             "live": live_round.round_number if live_round else 0,
         }
-
         logger.info(
             f"Initialized round numbers for job {job.job_id}: "
             f"evaluation={self.round_numbers[job.job_id]['evaluation']}, "
@@ -120,7 +130,9 @@ class AsyncRoundOrchestrator:
             return
 
         # 2. Get already registered miners from DB
-        registered_uids = await self.vault_service.vault_repository.get_registered_miner_uids()
+        registered_uids = (
+            await self.vault_service.vault_repository.get_registered_miner_uids()
+        )
 
         # 3. Find unregistered miners
         unregistered_uids = set(metagraph_uids) - set(registered_uids)
@@ -151,7 +163,9 @@ class AsyncRoundOrchestrator:
         miner_hotkey = self.metagraph.hotkeys[miner_uid]
         miner_axon = self.metagraph.axons[miner_uid]
 
-        logger.debug(f"Querying miner {miner_uid} ({miner_hotkey[:8]}...) for vault info")
+        logger.debug(
+            f"Querying miner {miner_uid} ({miner_hotkey[:8]}...) for vault info"
+        )
 
         # Create and send synapse
         synapse = VaultRegistrationQuery()
@@ -208,34 +222,28 @@ class AsyncRoundOrchestrator:
 
     async def run_job_continuously(self, job: Job):
         """
-        Run a job continuously with dual-mode rounds.
+            Run a job continuously with dual-mode rounds.
 
         Args:
             job: Job to run
         """
+
         logger.info(f"Starting continuous operation for job {job.job_id}")
-        # Initialize round counters from database (handles restarts)
         if job.job_id not in self.round_numbers:
             await self._initialize_round_numbers(job)
-
         while True:
             try:
-                # Run evaluation and live rounds concurrently
                 await asyncio.gather(
                     self.run_evaluation_round(job),
                     self.run_live_round(job),
-                    # return_exceptions=True,
                 )
-
-                # Wait before next round
                 logger.info(
-                    f"Job {job.job_id}: Sleeping for {job.round_duration_seconds}s"
+                    f"Job {job.job_id}: Sleeping for {job.round_duration_seconds} s"
                 )
                 await asyncio.sleep(job.round_duration_seconds)
-
             except Exception as e:
-                logger.error(f"Error in job {job.job_id}: {e}", exc_info=True)
-                await asyncio.sleep(60)
+                logger.error(f"Error in job {job.job_id}: {e}")
+                await asyncio.sleep(job.round_duration_seconds)
 
     async def run_evaluation_round(self, job: Job):
         """
@@ -254,12 +262,18 @@ class AsyncRoundOrchestrator:
         """
         # Get active miners
         liq_manager = SnLiqManagerService(
-            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
+            job.chain_id,
+            job.sn_liquidity_manager_address,
+            job.pair_address,
         )
+        my_uid = self.config.get("my_uid")
         active_uids = [
-            uid for uid in range(len(self.metagraph.S)) if self.metagraph.S[uid] > 0
+            uid
+            for uid in range(len(self.metagraph.S))
+            if (my_uid is None or uid != my_uid)
+            and is_miner_whitelisted(self.metagraph.hotkeys[uid])
         ]
-        if len(active_uids) == 0:
+        if not active_uids:
             logger.warning("No active miners found.")
             return
 
@@ -283,99 +297,109 @@ class AsyncRoundOrchestrator:
 
         self.round_numbers[job.job_id]["evaluation"] += 1
         round_number = self.round_numbers[job.job_id]["evaluation"]
-
-        logger.info(f"=" * 60)
-        logger.info(f"Starting EVALUATION round #{round_number} for job {job.job_id}")
-        logger.info(f"=" * 60)
-
-        # Get target block
         current_block = await self._get_latest_block(job.chain_id)
-
-        # Create round (use get_or_create to handle restarts gracefully)
-        round_obj, created = await self.job_repository.get_or_create_round(
+        round_obj = await self.job_repository.create_round(
             job=job,
             round_type=RoundType.EVALUATION,
             round_number=round_number,
             start_block=current_block,
         )
-        if not created:
-            logger.info(f"Round {round_number} already exists, skipping to next round")
-            return
-
-        # Get inventory from SNLiquidityManager contract
+        self.round_numbers[job.job_id]["evaluation"] = round_obj.round_number
+        round_number = round_obj.round_number
+        logger.info("=" * 60)
+        logger.info(f"Starting EVALUATION round #{round_number} for job {job.job_id}")
+        logger.info("=" * 60)
         inventory = await liq_manager.get_inventory()
-
-        # Get initial positions from on-chain
         initial_positions = await liq_manager.get_current_positions()
         logger.info(f"Loaded {len(initial_positions)} initial positions from on-chain")
 
-        # Run backtest for each miner, querying them at rebalance checkpoints
-        scores = await self._evaluate_miners(
-            job=job,
-            round_=round_obj,
-            active_uids=active_uids,
-            initial_positions=initial_positions,
-            start_block=current_block,
-            inventory=inventory,
-        )
-
-        # Select winner (tie-break by historic combined_score)
-        winner = await self._select_winner(job.job_id, scores)
-        if winner:
-            logger.info(
-                f"Evaluation round {round_number} winner: Miner {winner['miner_uid']} "
-                f"(Score: {winner['score']:.4f})"
+        try:
+            scores = await self._evaluate_miners(
+                job=job,
+                round_=round_obj,
+                active_uids=active_uids,
+                initial_positions=initial_positions,
+                start_block=current_block,
+                inventory=inventory,
+                liq_manager=liq_manager,
             )
-        else:
-            logger.warning(f"No winner for evaluation round {round_number}")
 
-        # Complete round - only save serializable score data
-        serializable_scores = {
-            str(k): {"hotkey": v["hotkey"], "score": float(v["score"])}
-            for k, v in scores.items()
-        }
-        await self.job_repository.complete_round(
-            round_id=round_obj.round_id,
-            winner_uid=winner["miner_uid"] if winner else None,
-            performance_data={"scores": {str(k): v["score"] for k, v in scores.items()}},
-        )
+            winner = await select_winner(self.job_repository, job.job_id, scores)
+            if winner:
+                logger.info(
+                    f"Winner (evaluation round #{round_number}, job {job.job_id}): "
+                    f"Miner UID={winner['miner_uid']}, score={winner['score']:.4f}, "
+                    f"hotkey={winner['hotkey']}"
+                )
+            else:
+                logger.warning(f"No winner for evaluation round {round_number}")
 
-        # Update MinerScore (eval EMA) and participation for all participants
-        # after winner selection so tie-breaking uses pre-update combined_score
-        for uid, data in scores.items():
+            await self.job_repository.complete_round(
+                round_id=round_obj.round_id,
+                winner_uid=winner["miner_uid"] if winner else None,
+                performance_data={
+                    "scores": {str(k): v["score"] for k, v in scores.items()}
+                },
+            )
+        except Exception as e:
+            logger.error(f"Evaluation round failed for job {job.job_id}: {e}")
+            await self.job_repository.complete_round(
+                round_id=round_obj.round_id,
+                winner_uid=None,
+                performance_data={"error": str(e)},
+            )
+            return
+        # Run score + participation updates in parallel batches to reduce DB latency
+        job_id = job.job_id
+        items = list(scores.items())
+
+        async def _update_one(uid: int, data: dict) -> None:
+            accepted = data["accepted"]
             await self.job_repository.update_miner_score(
-                job_id=job.job_id,
+                job_id=job_id,
                 miner_uid=uid,
                 miner_hotkey=data["hotkey"],
                 evaluation_score=data["score"],
                 round_type=RoundType.EVALUATION,
+                accepted=accepted,
             )
             await self.job_repository.update_miner_participation(
-                job_id=job.job_id, miner_uid=uid, participated=True
+                job_id=job_id, miner_uid=uid, accepted=accepted
             )
 
+        for i in range(0, len(items), SCORE_UPDATE_BATCH_SIZE):
+            batch = items[i : i + SCORE_UPDATE_BATCH_SIZE]
+            await asyncio.gather(*[_update_one(uid, data) for uid, data in batch])
         logger.info(f"Completed evaluation round {round_number}")
 
-    async def run_live_round(self, job: Job):
-        """
-        Run a live round for a job.
+    async def _select_winner(
+        self, job_id: str, scores: Dict[int, Dict]
+    ) -> Optional[Dict]:
+        """Select one winner per job; tie-break by historic combined_score. For tests."""
+        return await select_winner(self.job_repository, job_id, scores)
 
-        Steps:
-        1. Get previous evaluation winner
-        2. Check if eligible (7+ days participation)
-        3. Get initial positions
-        4. Query winner for rebalancing decisions
-        5. Execute on-chain via executor bot
-        6. Evaluate actual performance
-        7. Update live scores
-
-        Args:
-            job: Job to run live round for
-        """
-        # 1. Get previous evaluation winner
-        winner_uid = await self.job_repository.get_previous_winner(job.job_id)
+    async def run_live_round(self, job: Job) -> None:
+        """Run a live round with the first eligible miner from evaluation ranking."""
+        ranking = await self.job_repository.get_evaluation_round_ranking(job.job_id)
+        if not ranking:
+            logger.info(
+                f"No evaluation ranking for job {job.job_id}, skipping live round"
+            )
+            return
+        eligible_uids = {
+            s.miner_uid
+            for s in await self.job_repository.get_eligible_miners(job.job_id)
+            if is_miner_whitelisted(s.miner_hotkey)
+        }
+        winner_uid = None
+        for uid in ranking:
+            if uid in eligible_uids:
+                winner_uid = uid
+                break
         if winner_uid is None:
-            logger.info(f"No previous winner for job {job.job_id}, skipping live round")
+            logger.info(
+                f"No eligible miners for live round (tried: {ranking}), skipping"
+            )
             return
 
         # 2. Check eligibility (7+ days participation)
@@ -383,7 +407,9 @@ class AsyncRoundOrchestrator:
         # Check if winner is in eligible list
         is_eligible = any(s.miner_uid == winner_uid for s in miner_score)
         if not is_eligible:
-            logger.info(f"Miner {winner_uid} not eligible for live round yet (participation requirement)")
+            logger.info(
+                f"Miner {winner_uid} not eligible for live round yet (participation requirement)"
+            )
             return
 
         # 3. Check vault eligibility if required
@@ -394,7 +420,9 @@ class AsyncRoundOrchestrator:
                 require_minimum_balance=True,
             )
             if not has_vault:
-                logger.info(f"Miner {winner_uid} not eligible for live round (no verified vault)")
+                logger.info(
+                    f"Miner {winner_uid} not eligible for live round (no verified vault)"
+                )
                 return
 
         logger.info(f"=" * 60)
@@ -403,30 +431,33 @@ class AsyncRoundOrchestrator:
 
         self.round_numbers[job.job_id]["live"] += 1
         round_number = self.round_numbers[job.job_id]["live"]
-
-        # Get target block
         current_block = await self._get_latest_block(job.chain_id)
-        
-        # Create round
         round_obj = await self.job_repository.create_round(
             job=job,
             round_type=RoundType.LIVE,
             round_number=round_number,
             start_block=current_block,
         )
-
-        liq_manager = SnLiqManagerService(
-            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
+        self.round_numbers[job.job_id]["live"] = round_obj.round_number
+        round_number = round_obj.round_number
+        logger.info("=" * 60)
+        logger.info(
+            f"Winner for live execution (job {job.job_id}, round #{round_number}): "
+            f"Miner UID={winner_uid}, hotkey={self.metagraph.hotkeys[winner_uid]}"
         )
-
-        # Get inventory from SNLiquidityManager contract
+        logger.info(
+            f"Starting LIVE round #{round_number} for job {job.job_id} with Miner {winner_uid}"
+        )
+        logger.info("=" * 60)
+        liq_manager = SnLiqManagerService(
+            job.chain_id,
+            job.sn_liquidity_manager_address,
+            job.pair_address,
+        )
         inventory = await liq_manager.get_inventory()
-
-        # Get initial positions from on-chain
         initial_positions = await liq_manager.get_current_positions()
-        
-        # Run live execution loop
-        result = await self._run_with_miner_for_live(
+
+        result = await run_with_miner_for_live(
             miner_uid=winner_uid,
             job=job,
             round_=round_obj,
@@ -434,44 +465,67 @@ class AsyncRoundOrchestrator:
             start_block=current_block,
             initial_inventory=inventory,
             rebalance_check_interval=self.rebalance_check_interval,
+            liq_manager=liq_manager,
+            job_repository=self.job_repository,
+            config=self.config,
+            dendrite=self.dendrite,
+            metagraph=self.metagraph,
+            backtester=self.backtester,
+            get_block_fn=self._get_latest_block,
         )
 
-        # Update live score
         if result["accepted"]:
             execution_failures = result.get("execution_failures", 0)
             execution_results = result.get("execution_results", [])
             total_executions = len(execution_results)
-            
-            # Check if all executions failed - if so, revert score update
+            rebalance_history = result.get("rebalance_history", [])
+            logger.info(
+                f"Live execution summary (job {job.job_id}, round #{round_number}, "
+                f"winner Miner {winner_uid}): {len(rebalance_history)} rebalance(s), "
+                f"{total_executions - execution_failures}/{total_executions} on-chain execution(s) succeeded, "
+                f"score={result.get('score', 0):.4f}"
+            )
+            if rebalance_history:
+                for i, step in enumerate(rebalance_history):
+                    new_pos = step.get("new_positions") or []
+                    n_pos = len(new_pos)
+                    pos_desc = []
+                    for p in new_pos[:5]:  # log up to 5 positions
+                        if hasattr(p, "tick_lower"):
+                            pos_desc.append(
+                                f"[tick_{p.tick_lower}_{p.tick_upper} "
+                                f"a0={getattr(p, 'allocation0', '?')} a1={getattr(p, 'allocation1', '?')}]"
+                            )
+                        else:
+                            pos_desc.append(str(p)[:80])
+                    if len(new_pos) > 5:
+                        pos_desc.append(f"...+{len(new_pos) - 5} more")
+                    logger.info(
+                        f"  Live strategy step {i + 1}: {n_pos} position(s) "
+                        f"block={step.get('block')} tx_hash={step.get('tx_hash') or 'N/A'} "
+                        f"positions={', '.join(pos_desc) if pos_desc else 'none'}"
+                    )
             if total_executions > 0 and execution_failures == total_executions:
                 logger.error(
                     f"All {total_executions} executions failed for miner {winner_uid} "
                     f"in live round {round_number}. Not updating score."
                 )
-                # Don't update score if all executions failed
-                # The round is still marked as completed but with no score update
             else:
-                # For live rounds, we might want to weight the score differently or use actual PnL
-                # For now, we use the same simulated metric but based on real execution path
                 live_score = result["score"]
-                
-                # If some executions failed, log a warning but still update score
                 if execution_failures > 0:
                     logger.warning(
                         f"Miner {winner_uid} had {execution_failures}/{total_executions} "
-                        f"execution failures in live round {round_number}. "
-                        f"Score may be inaccurate."
+                        f"execution failures in live round {round_number}. Score may be inaccurate."
                     )
-                
+                logger.info(f"Miner {winner_uid} live score: {live_score}")
                 await self.job_repository.update_miner_score(
                     job_id=job.job_id,
                     miner_uid=winner_uid,
                     miner_hotkey=self.metagraph.hotkeys[winner_uid],
                     live_score=live_score,
                     round_type=RoundType.LIVE,
+                    accepted=True,
                 )
-            
-            # Save rebalance decisions (even for live, even if executions failed)
             await self.job_repository.save_rebalance_decision(
                 round_id=round_obj.round_id,
                 job_id=job.job_id,
@@ -483,15 +537,15 @@ class AsyncRoundOrchestrator:
                 response_time_ms=result.get("total_query_time_ms", 0),
             )
         else:
-            logger.warning(f"Miner {winner_uid} failed/refused live round: {result.get('refusal_reason')}")
+            logger.warning(
+                f"Miner {winner_uid} failed/refused live round: {result.get('refusal_reason')}"
+            )
 
-        # Complete round
         await self.job_repository.complete_round(
             round_id=round_obj.round_id,
             winner_uid=winner_uid if result["accepted"] else None,
             performance_data={"score": result.get("score", 0)},
         )
-        
         logger.info(f"Completed LIVE round {round_number}")
 
     async def _run_with_miner_for_live(
@@ -506,7 +560,7 @@ class AsyncRoundOrchestrator:
     ) -> Dict:
         """
         Run live round loop, executing decisions on-chain.
-        
+
         Returns:
             Dict with:
                 - accepted: bool
@@ -517,29 +571,33 @@ class AsyncRoundOrchestrator:
                 - execution_results: List[Dict] - Execution results
         """
         liq_manager = SnLiqManagerService(
-            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
+            job.chain_id,
+            job.sn_liquidity_manager_address,
+            job.pair_address,
         )
-        
+
         # Track state
         current_positions, current_inventory = initial_positions, initial_inventory
-        rebalance_history = [{
-            "block": start_block - 1,
-            "new_positions": initial_positions,
-            "inventory": initial_inventory
-        }]
+        rebalance_history = [
+            {
+                "block": start_block - 1,
+                "new_positions": initial_positions,
+                "inventory": initial_inventory,
+            }
+        ]
         total_query_time_ms = 0
         rebalances_so_far = 0
         execution_failures = 0
         execution_results = []
-        
+
         current_block = start_block
-        
+
         while round_.round_deadline >= datetime.now(timezone.utc):
             # Check rebalance interval
             if (current_block - start_block) % rebalance_check_interval == 0:
                 price_at_query = await liq_manager.get_current_price()
                 start_query = time.time()
-                
+
                 response = await self._query_miner_for_rebalance(
                     miner_uid=miner_uid,
                     job_id=job.job_id,
@@ -553,11 +611,15 @@ class AsyncRoundOrchestrator:
                     inventory=current_inventory,
                     rebalances_so_far=rebalances_so_far,
                 )
-                
+
                 query_time_ms = int((time.time() - start_query) * 1000)
                 total_query_time_ms += query_time_ms
-                
-                if response and response.accepted and response.desired_positions is not None:
+
+                if (
+                    response
+                    and response.accepted
+                    and response.desired_positions is not None
+                ):
                     # Check if positions changed
                     # (Simple check, ideally compare sets/hashes)
                     is_diff = False
@@ -565,11 +627,11 @@ class AsyncRoundOrchestrator:
                         is_diff = True
                     else:
                         # Deep compare
-                        pass # Assuming always rebalance if sent? Or simple check
+                        pass  # Assuming always rebalance if sent? Or simple check
                         # For now assume if they sent positions, they want to set them
                         # But we should optimize gas.
                         # Let's assume if it's identical we skip.
-                        # For MVP, execute every time miner returns positions? 
+                        # For MVP, execute every time miner returns positions?
                         # Or let miner return None/Empty if no change?
                         # Protocol says: "If desired_positions != current_positions: Rebalance"
                         # We'll rely on miner to be smart, or check strict equality here.
@@ -580,20 +642,21 @@ class AsyncRoundOrchestrator:
                         job=job,
                         round_obj=round_,
                         miner_uid=miner_uid,
-                        rebalance_history=rebalance_history + [{
-                            "new_positions": response.desired_positions
-                        }]
+                        rebalance_history=rebalance_history
+                        + [{"new_positions": response.desired_positions}],
                     )
-                    
+
                     # Track execution result
-                    execution_results.append({
-                        "block": current_block,
-                        "success": execution_result["success"],
-                        "execution_id": execution_result.get("execution_id"),
-                        "tx_hash": execution_result.get("tx_hash"),
-                        "error": execution_result.get("error")
-                    })
-                    
+                    execution_results.append(
+                        {
+                            "block": current_block,
+                            "success": execution_result["success"],
+                            "execution_id": execution_result.get("execution_id"),
+                            "tx_hash": execution_result.get("tx_hash"),
+                            "error": execution_result.get("error"),
+                        }
+                    )
+
                     if execution_result["success"]:
                         # Record the rebalance in our local history for scoring
                         # In live mode, we should ideally fetch the NEW inventory/positions from chain
@@ -601,42 +664,52 @@ class AsyncRoundOrchestrator:
                         # We assume execution succeeds for simulation purposes?
                         # Or we wait?
                         # For MVP, we update local state assuming success.
-                        
+
                         # Recalculate inventory usage locally
                         rebalance_price = await liq_manager.get_current_price()
                         total_amount_0_placed, total_amount_1_placed = 0, 0
                         for position in response.desired_positions:
-                            (_, a0, a1) = UniswapV3Math.position_liquidity_and_used_amounts(
-                                position.tick_lower, position.tick_upper,
-                                int(position.allocation0), int(position.allocation1),
-                                rebalance_price
+                            (_, a0, a1) = (
+                                UniswapV3Math.position_liquidity_and_used_amounts(
+                                    position.tick_lower,
+                                    position.tick_upper,
+                                    int(position.allocation0),
+                                    int(position.allocation1),
+                                    rebalance_price,
+                                )
                             )
                             total_amount_0_placed += a0
                             total_amount_1_placed += a1
-                            
+
                         # Update inventory (simplified)
                         # In reality, inventory changes due to fees/swaps.
                         # We should probably re-fetch inventory from chain next loop.
                         # But for scoring consistency, we track logical inventory.
-                        amount_0_int = int(initial_inventory.amount0) - total_amount_0_placed
-                        amount_1_int = int(initial_inventory.amount1) - total_amount_1_placed
-                        
-                        current_inventory = Inventory(
-                            amount0=str(max(0, amount_0_int)), 
-                            amount1=str(max(0, amount_1_int))
+                        amount_0_int = (
+                            int(initial_inventory.amount0) - total_amount_0_placed
                         )
-                        
-                        rebalance_history.append({
-                            "block": current_block,
-                            "price": rebalance_price,
-                            "price_in_query": price_at_query,
-                            "old_positions": current_positions,
-                            "new_positions": response.desired_positions,
-                            "inventory": current_inventory,
-                            "execution_id": execution_result.get("execution_id"),
-                            "tx_hash": execution_result.get("tx_hash"),
-                        })
-                        
+                        amount_1_int = (
+                            int(initial_inventory.amount1) - total_amount_1_placed
+                        )
+
+                        current_inventory = Inventory(
+                            amount0=str(max(0, amount_0_int)),
+                            amount1=str(max(0, amount_1_int)),
+                        )
+
+                        rebalance_history.append(
+                            {
+                                "block": current_block,
+                                "price": rebalance_price,
+                                "price_in_query": price_at_query,
+                                "old_positions": current_positions,
+                                "new_positions": response.desired_positions,
+                                "inventory": current_inventory,
+                                "execution_id": execution_result.get("execution_id"),
+                                "tx_hash": execution_result.get("tx_hash"),
+                            }
+                        )
+
                         current_positions = response.desired_positions
                         rebalances_so_far += 1
                     else:
@@ -648,10 +721,10 @@ class AsyncRoundOrchestrator:
                         )
                         # Don't update positions if execution failed
                         # The rebalance will be retried on next interval if miner still wants it
-                        
+
             else:
                 await asyncio.sleep(1)
-            
+
             current_block = await self._get_latest_block(job.chain_id)
 
         # Calculate score (using same backtester logic for consistency)
@@ -663,16 +736,16 @@ class AsyncRoundOrchestrator:
             initial_inventory,
             job.fee_rate,
         )
-        
+
         score = await Scorer.score_pol_strategy(metrics=performance_metrics)
-        
+
         return {
             "accepted": True,
             "score": score,
             "rebalance_history": rebalance_history,
             "total_query_time_ms": total_query_time_ms,
             "execution_failures": execution_failures,
-            "execution_results": execution_results
+            "execution_results": execution_results,
         }
 
     async def _evaluate_miners(
@@ -683,72 +756,66 @@ class AsyncRoundOrchestrator:
         initial_positions: List[Position],
         start_block: int,
         inventory: Inventory,
+        liq_manager,
     ) -> Dict[int, Dict]:
-        """
-        Evaluate all active miners by running backtests.
+        """Evaluate all active miners via batched dendrite calls (up to EVALUATION_BATCH_SIZE per batch)."""
+        results = await run_with_miners_batch_for_evaluation(
+            miner_uids=active_uids,
+            job=job,
+            round_=round_,
+            initial_positions=initial_positions,
+            start_block=start_block,
+            initial_inventory=inventory,
+            rebalance_check_interval=self.rebalance_check_interval,
+            liq_manager=liq_manager,
+            job_repository=self.job_repository,
+            dendrite=self.dendrite,
+            metagraph=self.metagraph,
+            backtester=self.backtester,
+            get_block_fn=self._get_latest_block,
+            query_batch_size=EVALUATION_BATCH_SIZE,
+        )
+        scores: Dict[int, Dict] = {}
+        for uid, res in results.items():
+            score_val = res["score"] if res["accepted"] else 0.0
+            scores[uid] = {
+                "hotkey": self.metagraph.hotkeys[uid],
+                "score": score_val,
+                "accepted": res["accepted"],
+                "result": res,
+            }
 
-        Args:
-            job: Job context
-            round_: Round object
-            active_uids: List of active miner UIDs
-            initial_positions: Initial positions
-            start_block: Start block
-            inventory: Inventory
+        round_id = round_.round_id
+        job_id = job.job_id
 
-        Returns:
-            Dict mapping miner_uid to score data
-        """
-        tasks = []
-        for uid in active_uids:
-            task = self._run_with_miner_for_evaluation(
-                miner_uid=uid,
-                job=job,
-                round_=round_,
-                initial_positions=initial_positions,
-                start_block=start_block,
-                initial_inventory=inventory,
-                rebalance_check_interval=self.rebalance_check_interval,
-            )
-            tasks.append(task)
-
-        # Run all backtests concurrently
-        results = await asyncio.gather(*tasks)
-
-        # Process results
-        scores = {}
-        for uid, result in zip(active_uids, results):
-            if result["accepted"]:
-                scores[uid] = {
-                    "hotkey": self.metagraph.hotkeys[uid],
-                    "score": result["score"],
-                    "result": result,
-                }
-
-                # Save rebalance decisions (serialize for JSON storage)
-                serializable_history = self._serialize_rebalance_history(result["rebalance_history"])
+        async def _save_one(uid: int, res: dict) -> None:
+            if res["accepted"]:
                 await self.job_repository.save_rebalance_decision(
-                    round_id=round_.round_id,
-                    job_id=job.job_id,
+                    round_id=round_id,
+                    job_id=job_id,
                     miner_uid=uid,
                     miner_hotkey=self.metagraph.hotkeys[uid],
                     accepted=True,
-                    rebalance_data=serializable_history,
+                    rebalance_data=res["rebalance_history"],
                     refusal_reason=None,
-                    response_time_ms=result.get("total_query_time_ms", 0),
+                    response_time_ms=res.get("total_query_time_ms", 0),
                 )
             else:
-                # Miner refused
-                logger.info(f"Miner {uid} refused job: {result.get('refusal_reason')}")
                 await self.job_repository.save_rebalance_decision(
-                    round_id=round_.round_id,
-                    job_id=job.job_id,
+                    round_id=round_id,
+                    job_id=job_id,
                     miner_uid=uid,
                     miner_hotkey=self.metagraph.hotkeys[uid],
                     accepted=False,
                     rebalance_data=None,
-                    refusal_reason=result.get("refusal_reason"),
-                    response_time_ms=0,
+                    refusal_reason=res.get("refusal_reason"),
+                    response_time_ms=res.get("total_query_time_ms", 0),
                 )
+
+        items = list(results.items())
+        for i in range(0, len(items), SCORE_UPDATE_BATCH_SIZE):
+            batch = items[i : i + SCORE_UPDATE_BATCH_SIZE]
+            await asyncio.gather(*[_save_one(uid, res) for uid, res in batch])
 
         return scores
 
@@ -784,18 +851,22 @@ class AsyncRoundOrchestrator:
                 - total_query_time_ms: Total time spent querying miner
         """
         liq_manager = SnLiqManagerService(
-            job.chain_id, job.sn_liquidity_manager_address, job.pair_address,
+            job.chain_id,
+            job.sn_liquidity_manager_address,
+            job.pair_address,
         )
         logger.info(f"[ROUND={round_.round_id}] Running backtest for miner {miner_uid}")
 
         # Track state
         current_positions, current_inventory = initial_positions, initial_inventory
         # Initialize history with starting state (at block before start to cover start_block)
-        rebalance_history = [{
-            "block": start_block - 1,
-            "new_positions": initial_positions,
-            "inventory": initial_inventory
-        }]
+        rebalance_history = [
+            {
+                "block": start_block - 1,
+                "new_positions": initial_positions,
+                "inventory": initial_inventory,
+            }
+        ]
         total_query_time_ms = 0
         rebalances_so_far = 0
 
@@ -880,8 +951,12 @@ class AsyncRoundOrchestrator:
                         total_amount_0_placed += actual_amount0_used
                         total_amount_1_placed += actual_amount1_used
 
-                    amount_0_int = int(initial_inventory.amount0) - total_amount_0_placed
-                    amount_1_int = int(initial_inventory.amount1) - total_amount_1_placed
+                    amount_0_int = (
+                        int(initial_inventory.amount0) - total_amount_0_placed
+                    )
+                    amount_1_int = (
+                        int(initial_inventory.amount1) - total_amount_1_placed
+                    )
                     if amount_0_int < 0 or amount_1_int < 0:
                         return {
                             "accepted": False,
@@ -951,22 +1026,36 @@ class AsyncRoundOrchestrator:
             if "inventory" in new_item and hasattr(new_item["inventory"], "dict"):
                 new_item["inventory"] = new_item["inventory"].dict()
             if "new_positions" in new_item:
-                new_item["new_positions"] = [p.dict() for p in new_item["new_positions"] if hasattr(p, "dict")]
+                new_item["new_positions"] = [
+                    p.dict() for p in new_item["new_positions"] if hasattr(p, "dict")
+                ]
             if "old_positions" in new_item:
-                new_item["old_positions"] = [p.dict() for p in new_item["old_positions"] if hasattr(p, "dict")]
+                new_item["old_positions"] = [
+                    p.dict() for p in new_item["old_positions"] if hasattr(p, "dict")
+                ]
             serialized_history.append(new_item)
 
         serialized_metrics = performance_metrics.copy()
-        if "initial_inventory" in serialized_metrics and hasattr(serialized_metrics["initial_inventory"], "dict"):
-            serialized_metrics["initial_inventory"] = serialized_metrics["initial_inventory"].dict()
-        if "final_inventory" in serialized_metrics and hasattr(serialized_metrics["final_inventory"], "dict"):
-            serialized_metrics["final_inventory"] = serialized_metrics["final_inventory"].dict()
+        if "initial_inventory" in serialized_metrics and hasattr(
+            serialized_metrics["initial_inventory"], "dict"
+        ):
+            serialized_metrics["initial_inventory"] = serialized_metrics[
+                "initial_inventory"
+            ].dict()
+        if "final_inventory" in serialized_metrics and hasattr(
+            serialized_metrics["final_inventory"], "dict"
+        ):
+            serialized_metrics["final_inventory"] = serialized_metrics[
+                "final_inventory"
+            ].dict()
 
         return {
             "accepted": True,
             "refusal_reason": None,
             "rebalance_history": serialized_history,
-            "final_positions": [p.dict() for p in current_positions if hasattr(p, "dict")],
+            "final_positions": [
+                p.dict() for p in current_positions if hasattr(p, "dict")
+            ],
             "performance_metrics": serialized_metrics,
             "score": miner_score_val,
             "total_query_time_ms": total_query_time_ms,
@@ -1024,8 +1113,12 @@ class AsyncRoundOrchestrator:
         miner_axon = self.metagraph.axons[miner_uid]
         # Convert sqrtPriceX96 to human-readable price for logging
         readable_price = UniswapV3Math.sqrt_price_x96_to_price(current_price_sqrtX96)
-        logger.info(f"[QUERY] >>> Sending to miner {miner_uid} @ {miner_axon.ip}:{miner_axon.port}")
-        logger.info(f"[QUERY]     Job: {job_id}, Block: {block_number}, Price: {readable_price:.6f}")
+        logger.info(
+            f"[QUERY] >>> Sending to miner {miner_uid} @ {miner_axon.ip}:{miner_axon.port}"
+        )
+        logger.info(
+            f"[QUERY]     Job: {job_id}, Block: {block_number}, Price: {readable_price:.6f}"
+        )
 
         try:
             query_start = time_module.time()
@@ -1040,11 +1133,17 @@ class AsyncRoundOrchestrator:
             response = responses[0] if responses else None
 
             if response and hasattr(response, "accepted"):
-                logger.info(f"[QUERY] <<< Response from miner {miner_uid} in {query_elapsed:.0f}ms")
-                logger.info(f"[QUERY]     Accepted: {response.accepted}, Positions: {len(response.desired_positions) if response.desired_positions else 0}")
+                logger.info(
+                    f"[QUERY] <<< Response from miner {miner_uid} in {query_elapsed:.0f}ms"
+                )
+                logger.info(
+                    f"[QUERY]     Accepted: {response.accepted}, Positions: {len(response.desired_positions) if response.desired_positions else 0}"
+                )
                 return response
 
-            logger.debug(f"Miner refused or failed. Refusal reason: {response.refusal_reason if response else 'No response'}")
+            logger.debug(
+                f"Miner refused or failed. Refusal reason: {response.refusal_reason if response else 'No response'}"
+            )
             return None
 
         except Exception as e:
@@ -1077,7 +1176,7 @@ class AsyncRoundOrchestrator:
                 "success": False,
                 "execution_id": None,
                 "tx_hash": None,
-                "error": "No executor bot URL configured"
+                "error": "No executor bot URL configured",
             }
 
         # Get final positions from last rebalance
@@ -1088,14 +1187,16 @@ class AsyncRoundOrchestrator:
         # Serialize positions - handle both Position objects and dicts
         positions = []
         for pos in final_positions:
-            if hasattr(pos, 'tick_lower'):
+            if hasattr(pos, "tick_lower"):
                 # Position object
-                positions.append({
-                    "tick_lower": pos.tick_lower,
-                    "tick_upper": pos.tick_upper,
-                    "allocation0": pos.allocation0,
-                    "allocation1": pos.allocation1,
-                })
+                positions.append(
+                    {
+                        "tick_lower": pos.tick_lower,
+                        "tick_upper": pos.tick_upper,
+                        "allocation0": pos.allocation0,
+                        "allocation1": pos.allocation1,
+                    }
+                )
             elif isinstance(pos, dict):
                 # Already a dict
                 positions.append(pos)
@@ -1119,7 +1220,7 @@ class AsyncRoundOrchestrator:
                 "success": False,
                 "execution_id": None,
                 "tx_hash": None,
-                "error": error_msg
+                "error": error_msg,
             }
 
         execution_id = None
@@ -1133,23 +1234,23 @@ class AsyncRoundOrchestrator:
                     f"{executor_url}/execute_strategy",
                     json=payload,
                     headers={"Content-Type": "application/json"},
-                    timeout=30
+                    timeout=30,
                 )
-            
+
             response = await asyncio.to_thread(make_request)
-            
+
             if response.status_code == 200:
                 logger.info(
                     f"Successfully sent strategy to executor bot for round {round_obj.round_id}, "
                     f"miner {miner_uid}"
                 )
-                
+
                 # Parse response to get tx details if available
                 try:
                     response_data = response.json()
                     tx_hash = response_data.get("tx_hash")
                     error_msg = response_data.get("error")
-                    
+
                     if error_msg:
                         logger.warning(
                             f"Executor bot returned error in response: {error_msg}"
@@ -1159,7 +1260,7 @@ class AsyncRoundOrchestrator:
                     logger.warning(
                         f"Failed to parse executor bot response as JSON: {json_error}"
                     )
-                
+
                 # Record live execution in DB (even if there's an error message)
                 try:
                     execution = await self.job_repository.create_live_execution(
@@ -1167,10 +1268,10 @@ class AsyncRoundOrchestrator:
                         job_id=job.job_id,
                         miner_uid=miner_uid,
                         strategy_data={"positions": positions},
-                        tx_hash=tx_hash
+                        tx_hash=tx_hash,
                     )
                     execution_id = execution.execution_id
-                    
+
                     # Update execution status based on response
                     if error:
                         execution.tx_status = "failed"
@@ -1182,16 +1283,16 @@ class AsyncRoundOrchestrator:
                 except Exception as db_error:
                     logger.error(
                         f"Failed to create live execution record: {db_error}",
-                        exc_info=True
+                        exc_info=True,
                     )
                     execution_id = None
                     error = f"Database error: {str(db_error)}"
-                
+
                 return {
                     "success": error is None,  # Success only if no error
                     "execution_id": execution_id,
                     "tx_hash": tx_hash,
-                    "error": error
+                    "error": error,
                 }
             else:
                 # Non-200 status code
@@ -1202,12 +1303,12 @@ class AsyncRoundOrchestrator:
                         error_msg += f": {error_body}"
                 except Exception:
                     pass
-                
+
                 logger.error(
                     f"Executor bot execution failed: {error_msg} "
                     f"(round={round_obj.round_id}, miner={miner_uid})"
                 )
-                
+
                 # Still create execution record with failed status
                 try:
                     execution = await self.job_repository.create_live_execution(
@@ -1215,7 +1316,7 @@ class AsyncRoundOrchestrator:
                         job_id=job.job_id,
                         miner_uid=miner_uid,
                         strategy_data={"positions": positions},
-                        tx_hash=None
+                        tx_hash=None,
                     )
                     execution_id = execution.execution_id
                     execution.tx_status = "failed"
@@ -1224,15 +1325,15 @@ class AsyncRoundOrchestrator:
                 except Exception as db_error:
                     logger.error(
                         f"Failed to create failed execution record: {db_error}",
-                        exc_info=True
+                        exc_info=True,
                     )
                     execution_id = None
-                
+
                 return {
                     "success": False,
                     "execution_id": execution_id,
                     "tx_hash": None,
-                    "error": error_msg
+                    "error": error_msg,
                 }
 
         except requests.RequestException as e:
@@ -1240,9 +1341,9 @@ class AsyncRoundOrchestrator:
             logger.error(
                 f"Failed to send strategy to executor bot: {error_msg} "
                 f"(round={round_obj.round_id}, miner={miner_uid})",
-                exc_info=True
+                exc_info=True,
             )
-            
+
             # Create execution record with failed status
             try:
                 execution = await self.job_repository.create_live_execution(
@@ -1250,7 +1351,7 @@ class AsyncRoundOrchestrator:
                     job_id=job.job_id,
                     miner_uid=miner_uid,
                     strategy_data={"positions": positions},
-                    tx_hash=None
+                    tx_hash=None,
                 )
                 execution_id = execution.execution_id
                 execution.tx_status = "failed"
@@ -1259,24 +1360,24 @@ class AsyncRoundOrchestrator:
             except Exception as db_error:
                 logger.error(
                     f"Failed to create failed execution record: {db_error}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 execution_id = None
-            
+
             return {
                 "success": False,
                 "execution_id": execution_id,
                 "tx_hash": None,
-                "error": error_msg
+                "error": error_msg,
             }
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
             logger.error(
                 f"Unexpected error sending strategy to executor bot: {error_msg} "
                 f"(round={round_obj.round_id}, miner={miner_uid})",
-                exc_info=True
+                exc_info=True,
             )
-            
+
             # Create execution record with failed status
             try:
                 execution = await self.job_repository.create_live_execution(
@@ -1284,7 +1385,7 @@ class AsyncRoundOrchestrator:
                     job_id=job.job_id,
                     miner_uid=miner_uid,
                     strategy_data={"positions": positions},
-                    tx_hash=None
+                    tx_hash=None,
                 )
                 execution_id = execution.execution_id
                 execution.tx_status = "failed"
@@ -1293,14 +1394,14 @@ class AsyncRoundOrchestrator:
             except Exception as db_error:
                 logger.error(
                     f"Failed to create failed execution record: {db_error}",
-                    exc_info=True
+                    exc_info=True,
                 )
-            
+
             return {
                 "success": False,
                 "execution_id": execution_id,
                 "tx_hash": None,
-                "error": error_msg
+                "error": error_msg,
             }
 
     async def _select_winner(
@@ -1342,17 +1443,25 @@ class AsyncRoundOrchestrator:
             old_pos = entry.get("old_positions") or []
             new_pos = entry.get("new_positions") or []
             serialized_entry["old_positions"] = [
-                p.__dict__ if hasattr(p, '__dict__') else p for p in old_pos
+                p.__dict__ if hasattr(p, "__dict__") else p for p in old_pos
             ]
             serialized_entry["new_positions"] = [
-                p.__dict__ if hasattr(p, '__dict__') else p for p in new_pos
+                p.__dict__ if hasattr(p, "__dict__") else p for p in new_pos
             ]
             # Serialize inventory
             inv = entry.get("inventory")
             if inv:
                 serialized_entry["inventory"] = {
-                    "amount0": str(inv.amount0) if hasattr(inv, 'amount0') else str(inv.get("amount0", 0)),
-                    "amount1": str(inv.amount1) if hasattr(inv, 'amount1') else str(inv.get("amount1", 0)),
+                    "amount0": (
+                        str(inv.amount0)
+                        if hasattr(inv, "amount0")
+                        else str(inv.get("amount0", 0))
+                    ),
+                    "amount1": (
+                        str(inv.amount1)
+                        if hasattr(inv, "amount1")
+                        else str(inv.get("amount1", 0))
+                    ),
                 }
             serialized.append(serialized_entry)
         return serialized

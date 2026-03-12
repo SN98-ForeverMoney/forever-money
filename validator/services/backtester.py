@@ -145,12 +145,14 @@ class BacktesterService:
         total_fees1 = 0.0
         in_range_count = 0
         total_swaps = len(swap_events)
-
+        logger.info(f"Got {total_swaps} swaps for pair {pair_address}.")
         # Simulate each swap for fee accumulation
         for event in swap_events:
+            # TODO: make debug only
+            logger.info(f"[{pair_address}] Simulating event {event}")
             # Calculate price from sqrt_price_x96 if available
             sqrt_price_x96 = int(event.get("sqrt_price_x96"))
-            block_number = event.get("evt_block_number")
+            block_number = int(event.get("block_number"))
             positions = get_deployed_positions(block_number)
             total_in_range_liq = 0
             for position in positions:
@@ -205,6 +207,14 @@ class BacktesterService:
         initial_sqrt_price_x96 = await self.db.get_sqrt_price_at_block(
             pair_address, start_block
         )
+        if final_sqrt_price_x96 is None:
+            raise ValueError(
+                f"Cannot get sqrt price at end_block={end_block} for pair {pair_address}"
+            )
+        if initial_sqrt_price_x96 is None:
+            raise ValueError(
+                f"Cannot get sqrt price at start_block={start_block} for pair {pair_address}"
+            )
 
         # price in Q192 (token1/token0)
         final_price_x192 = (

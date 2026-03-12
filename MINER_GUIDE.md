@@ -12,7 +12,7 @@ This guide shows you how to implement your own liquidity management strategy as 
 2. **Validators query you** during forward simulations starting from current chainhead (live blockchain state)
 3. **You respond** with rebalancing decisions (keep current positions or rebalance to new positions)
 4. **You get scored** based on expected performance over the round duration (fees, impermanent loss, etc.)
-5. **Winners get selected** for live on-chain execution after 7 days of participation
+5. **Winners get selected** for live on-chain execution after consistent participation (default: 7 days)
 
 ### What You Receive (RebalanceQuery)
 

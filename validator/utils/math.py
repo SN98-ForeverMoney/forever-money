@@ -1,3 +1,4 @@
+import math
 from typing import Tuple
 
 
@@ -90,6 +91,17 @@ class UniswapV3Math:
 
         # round up to match Solidity
         return (ratio >> 32) + (1 if ratio & ((1 << 32) - 1) != 0 else 0)
+
+    @staticmethod
+    def get_tick_from_sqrt_price_x96(sqrt_price_x96: float) -> int:
+        """
+        Estimate tick from sqrtPriceX96.
+        """
+        if sqrt_price_x96 <= 0:
+            return 0
+        sqrt_price = float(sqrt_price_x96) / UniswapV3Math.Q96
+        tick = 2 * math.log(sqrt_price) / math.log(1.0001)
+        return int(tick)
 
     # -----------------------------
     # Liquidity math
