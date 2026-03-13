@@ -3,6 +3,7 @@ Tortoise ORM Models for SN98 Jobs System.
 
 All database operations are async using Tortoise ORM.
 """
+
 from enum import Enum
 from typing import Optional
 
@@ -15,7 +16,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
-    JOBS_POSTGRES_SCHEMA
+    JOBS_POSTGRES_SCHEMA,
 )
 
 
@@ -86,7 +87,9 @@ class Round(Model):
     end_time = fields.DatetimeField(null=True)
     winner_uid = fields.IntField(null=True)
     start_block = fields.IntField()
-    status = fields.CharEnumField(RoundStatus, default=RoundStatus.PENDING, db_index=True)
+    status = fields.CharEnumField(
+        RoundStatus, default=RoundStatus.PENDING, db_index=True
+    )
     performance_data = fields.JSONField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
 
@@ -271,7 +274,7 @@ TORTOISE_ORM = {
         "models": {
             "models": [
                 "validator.models.job",
-                "validator.models.pool_events",
+                "validator.models.miner_vault",
                 "aerich.models",
             ],
             "default_connection": "default",
@@ -289,35 +292,16 @@ async def init_db(db_url: Optional[str] = None, schema: Optional[str] = None):
         schema: Optional schema name.
     """
     if db_url:
-        modules = {
-            "models": [
-                "validator.models.job",
-                "validator.models.pool_events",
-            ],
-        }
-        config = {
-            "connections": {"default": db_url},
-            "apps": {
-                "models": {
-                    "models": modules["models"],
-                    "default_connection": "default",
-                }
+        await Tortoise.init(
+            db_url=db_url,
+            modules={
+                "models": [
+                    "validator.models.job",
+                    "validator.models.miner_vault",
+                    "validator.models.pool_events",
+                ]
             },
-        }
-        if schema:
-            config["connections"]["default"] = {
-                "engine": "tortoise.backends.asyncpg",
-                "credentials": {
-                    "host": JOBS_POSTGRES_HOST,
-                    "port": JOBS_POSTGRES_PORT,
-                    "user": JOBS_POSTGRES_USER,
-                    "password": JOBS_POSTGRES_PASSWORD,
-                    "database": JOBS_POSTGRES_DB,
-                    "schema": schema,
-                },
-            }
-        
-        await Tortoise.init(config=config)
+        )
     else:
         await Tortoise.init(config=TORTOISE_ORM)
 

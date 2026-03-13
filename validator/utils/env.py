@@ -24,15 +24,17 @@ def get_env_variable(name: str, type_: Type[T], default: Optional[T]) -> T:
         from source.helpers.dotenv import get_env_variable
 
         # Get a string environment variable with a default value.
-        get_env_variable("ENVIRONMENT", "development", str)
+        get_env_variable("ENVIRONMENT", str, "development")
 
         # Get an integer environment variable with a default value.
-        get_env_variable("PORT", 8000, int)
+        get_env_variable("PORT", int, 8000)
         ```
     """
+    value = os.getenv(name)
+    if value is None:
+        return default
 
     try:
-        value = os.getenv(name, default)
         return type_.__call__(value)
     except ValueError:
         raise ValueError(
@@ -129,5 +131,18 @@ MINER_ELIGIBILITY_DAYS = get_env_variable(
     name="MINER_ELIGIBILITY_DAYS",
     type_=int,
     default=7,
+)
+
+# Vault configuration
+REQUIRE_VAULT_FOR_EVALUATION = get_env_variable(
+    name="REQUIRE_VAULT_FOR_EVALUATION",
+    type_=str,
+    default="false",
+).lower() == "true"
+
+DEFAULT_MINIMUM_VAULT_BALANCE_USD = get_env_variable(
+    name="DEFAULT_MINIMUM_VAULT_BALANCE_USD",
+    type_=float,
+    default=1000.0,
 )
 

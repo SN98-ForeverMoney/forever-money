@@ -38,6 +38,7 @@ from validator.utils.env import (
     JOBS_POSTGRES_DB,
     JOBS_POSTGRES_USER,
     JOBS_POSTGRES_PASSWORD,
+    REQUIRE_VAULT_FOR_EVALUATION,
     JOBS_POSTGRES_SCHEMA,
     BT_WALLET_PATH,
     MINER_ELIGIBILITY_DAYS,
@@ -147,6 +148,7 @@ def get_config():
         "executor_bot_url": EXECUTOR_BOT_URL,
         "executor_bot_api_key": EXECUTOR_BOT_API_KEY,
         "rebalance_check_interval": REBALANCE_CHECK_INTERVAL,
+        "require_vault_for_evaluation": REQUIRE_VAULT_FOR_EVALUATION,
         "auto_update": getattr(args, "auto_update", "true") == "true",
     }
 
@@ -184,7 +186,9 @@ async def run_jobs_validator(config):
             metagraph.sync()
             logger.info("Metagraph synced from chain at startup.")
         except Exception as e:
-            logger.warning("Metagraph sync at startup failed (using loaded state): %s", e)
+            logger.warning(
+                "Metagraph sync at startup failed (using loaded state): %s", e
+            )
     dendrite = bt.Dendrite(wallet=wallet)
 
     # Find validator's own UID (exclude from miner queries to avoid self-query)
@@ -196,7 +200,9 @@ async def run_jobs_validator(config):
             break
     # Exit the process when the hotkey is not registered
     if my_uid is None:
-        logger.error(f"Hotkey {my_hotkey} is not registered on netuid {config['netuid']} (network: {config['subtensor_network']})")
+        logger.error(
+            f"Hotkey {my_hotkey} is not registered on netuid {config['netuid']} (network: {config['subtensor_network']})"
+        )
         logger.info("Exiting the process...")
         sys.exit(1)
 
@@ -211,7 +217,9 @@ async def run_jobs_validator(config):
 
     # Initialize Tortoise ORM
     logger.info("Initializing Tortoise ORM...")
-    db_schema = "validator" if config["subtensor_network"] == "test" else JOBS_POSTGRES_SCHEMA
+    db_schema = (
+        "validator" if config["subtensor_network"] == "test" else JOBS_POSTGRES_SCHEMA
+    )
     logger.info(f"Using schema: {db_schema}")
     await init_db(config["tortoise_db_url"], schema=db_schema)
     logger.info("Database connected")
@@ -313,7 +321,9 @@ async def run_jobs_validator(config):
                     f"Currently running {len(running_jobs)} job(s): {list(running_jobs.keys())}"
                 )
 
-                logger.info(f"Waiting for {check_interval} seconds before next check...")
+                logger.info(
+                    f"Waiting for {check_interval} seconds before next check..."
+                )
                 logger.info("-" * 80)
                 await asyncio.sleep(check_interval)
 
@@ -387,12 +397,15 @@ async def run_jobs_validator(config):
                 )
                 stdout, stderr = await proc.communicate()
                 if proc.returncode == 0:
-                    logger.info("Auto-update completed successfully (pm2 may restart this process).")
+                    logger.info(
+                        "Auto-update completed successfully (pm2 may restart this process)."
+                    )
                 else:
                     logger.warning(
                         "Auto-update script exited with code %s: %s",
                         proc.returncode,
-                        (stderr or stdout or b"").decode(errors="replace").strip() or "(no output)",
+                        (stderr or stdout or b"").decode(errors="replace").strip()
+                        or "(no output)",
                     )
             except Exception as e:
                 logger.error("Auto-update failed: %s", e, exc_info=True)

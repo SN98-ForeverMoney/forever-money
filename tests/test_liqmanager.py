@@ -198,7 +198,7 @@ async def test_get_inventory_failure_no_ak(service):
     mock_contract_call(service.liq_manager.functions.akAddressToPoolManager, ZERO_ADDRESS)
 
     # Execute & Verify
-    with pytest.raises(SystemExit, match="Neither token0"):
+    with pytest.raises(ValueError, match="Neither token0"):
         await service.get_inventory()
 
 @pytest.mark.asyncio

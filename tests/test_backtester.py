@@ -21,8 +21,8 @@ class MockDataSource(DataSource):
         # Filter by block range
         return [
             e for e in self.swap_events 
-            if (start_block is None or e["evt_block_number"] >= start_block) and
-               (end_block is None or e["evt_block_number"] <= end_block)
+            if (start_block is None or e["block_number"] >= start_block) and
+               (end_block is None or e["block_number"] <= end_block)
         ]
 
     async def get_sqrt_price_at_block(
@@ -49,7 +49,7 @@ async def test_backtester_no_price_change():
     
     # One swap event with same price, small amount
     swap_event = {
-        "evt_block_number": 100,
+        "block_number": 100,
         "sqrt_price_x96": initial_price,
         "amount0": 1000, # User swapped 1000 token0
         "amount1": -1000, # User got 1000 token1 (simplified)
@@ -112,7 +112,7 @@ async def test_backtester_price_goes_up():
     final_price = UniswapV3Math.get_sqrt_ratio_at_tick(100) # Price increased
     
     swap_event = {
-        "evt_block_number": 100,
+        "block_number": 100,
         "sqrt_price_x96": final_price,
         "amount0": -1000, 
         "amount1": 2000, # User input 2000 Token1

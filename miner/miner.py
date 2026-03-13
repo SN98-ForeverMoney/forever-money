@@ -12,12 +12,21 @@ Usage:
 import logging
 import argparse
 import time
-from typing import Optional, Tuple, Any
 import bittensor as bt
-
-
 import os
 import sys
+
+from typing import Optional, Tuple, Any
+
+from protocol import Position
+from protocol.synapses import RebalanceQuery, VaultRegistrationQuery
+from validator.utils.env import (
+    MINER_VERSION,
+    NETUID,
+    SUBTENSOR_NETWORK,
+    get_env_variable,
+)
+
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -60,21 +69,34 @@ class SN98Miner:
         self.subtensor = subtensor
         self.config = config
 
+        # Vault configuration (optional - for miner-owned vaults)
+        self.vault_address = get_env_variable("MINER_VAULT_ADDRESS", str, None)
+        self.vault_chain_id = get_env_variable("MINER_VAULT_CHAIN_ID", int, 8453)
+
         logger.info(f"Starting SN98 Miner v{MINER_VERSION}")
         logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
+        if self.vault_address:
+            logger.info(f"Vault: {self.vault_address} (chain {self.vault_chain_id})")
 
         # Create and configure axon
         self.axon = bt.Axon(wallet=wallet, config=config)
 
-        # Attach only RebalanceQuery handler
+        # Attach RebalanceQuery handler
         self.axon.attach(
             forward_fn=self.rebalance_query_handler,
             blacklist_fn=self.blacklist_rebalance_query,
             priority_fn=self.priority_rebalance_query,
         )
 
+        # Attach VaultRegistrationQuery handler
+        self.axon.attach(
+            forward_fn=self.vault_registration_handler,
+            blacklist_fn=self.blacklist_vault_registration,
+            priority_fn=self.priority_vault_registration,
+        )
+
         logger.info(f"Axon created on port {self.axon.port}")
-        logger.info(f"Serving RebalanceQuery endpoint only")
+        logger.info(f"Serving RebalanceQuery and VaultRegistrationQuery endpoints")
 
     async def rebalance_query_handler(self, synapse: RebalanceQuery) -> RebalanceQuery:
         """
@@ -207,6 +229,61 @@ class SN98Miner:
         # Equal priority for all requests
         return 0.0
 
+    async def vault_registration_handler(
+        self, synapse: VaultRegistrationQuery
+    ) -> VaultRegistrationQuery:
+        """
+        Handle VaultRegistrationQuery synapse from validators.
+
+        Returns the miner's vault address if configured.
+
+        Args:
+            synapse: VaultRegistrationQuery synapse
+
+        Returns:
+            VaultRegistrationQuery with vault info populated
+        """
+        logger.info("Received VaultRegistrationQuery")
+
+        if self.vault_address:
+            synapse.has_vault = True
+            synapse.vault_address = self.vault_address
+            synapse.chain_id = self.vault_chain_id
+            logger.info(f"Responding with vault: {self.vault_address}")
+        else:
+            synapse.has_vault = False
+            logger.info("No vault configured, responding with has_vault=False")
+
+        return synapse
+
+    def blacklist_vault_registration(
+        self, synapse: VaultRegistrationQuery
+    ) -> Tuple[bool, str]:
+        """
+        Blacklist function for VaultRegistrationQuery.
+
+        Args:
+            synapse: VaultRegistrationQuery synapse
+
+        Returns:
+            Tuple of (is_blacklisted, reason)
+        """
+        # Accept all requests
+        return False, ""
+
+    def priority_vault_registration(self, synapse: VaultRegistrationQuery) -> float:
+        """
+        Priority function for VaultRegistrationQuery.
+
+        Args:
+            synapse: VaultRegistrationQuery synapse
+
+        Returns:
+            Priority score
+        """
+        # Equal priority for all requests
+        return 0.0
+
     def run(self):
         """
         Start the miner axon server.
@@ -260,7 +337,11 @@ def get_config():
         "--wallet.name", type=str, required=True, default="default", help="Wallet name"
     )
     parser.add_argument(
-        "--wallet.hotkey", type=str, required=True, default="default", help="Wallet hotkey"
+        "--wallet.hotkey",
+        type=str,
+        required=True,
+        default="default",
+        help="Wallet hotkey",
     )
     parser.add_argument(
         "--wallet.path",
