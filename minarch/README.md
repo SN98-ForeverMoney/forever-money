@@ -25,6 +25,7 @@ This is not a production system — it’s a sandbox for experimentation.
     │ └── data.py # Data loading and utility functions
     │
     ├── miners/ # Implemented miner strategies
+    │ ├── baseline_position.py # simple allocation strategy
     │ ├── multi_position.py # 70/30 wide-tight allocation strategy
     │ ├── volatility_band_miner.py # Adaptive volatility-band strategy
     │ └── volatility_miner.py # Volatility-based LP strategy
@@ -101,10 +102,21 @@ from minarch.miners.volatility_band_miner import MinimalMiner
 from minarch.miners.multi_positions_miner import MinimalMiner
 ```
 
+Update main.py with a choosen pair, blocks and chunks size:
+
+```python
+block_chunk = 10_000
+# eth/usdc pool
+pair_address = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+# around 1 months of block data
+start_block = 41925600
+end_block = 43221600
+```
+
 Run main.py
 
 ```bash
-python3 -m v1.main
+python3 -m minarch.main
 ```
 
 This will generate an `output.log` file containing all the rebalances, positions, and metrics.

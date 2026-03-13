@@ -14,6 +14,8 @@ import logging
 import math
 from dataclasses import dataclass
 from typing import List
+from collections import deque
+
 
 # Configure logging
 logging.basicConfig(
@@ -79,6 +81,7 @@ class MinimalMiner:
         self.lp_width_multiplier = lp_width_multiplier
         self.min_volatility = min_volatility
         self.volatility_window = volatility_window
+        self.recent_prices = deque(maxlen=volatility_window)
         logger.info(
             f"""Starting Miner V1 with inventory: {inventory}, 
             band multiplier: {band_multiplier}, 
@@ -109,7 +112,9 @@ class MinimalMiner:
         return max(math.sqrt(variance), self.min_volatility)
 
     def rebalance_query_handler(
-        self, current_tick: int, tick_spacing: int, recent_prices: List[float]
+        self,
+        current_tick: int,
+        tick_spacing: int,
     ):
         """
         Determine whether to rebalance and generate a new LP position.
@@ -122,14 +127,15 @@ class MinimalMiner:
         Args:
             current_tick (int): Current market tick
             tick_spacing (int): Minimum tick spacing for the pool
-            recent_prices (List[float]): List of recent ticks for volatility calculation
 
         Returns:
             List[Position]: Updated list of LP positions (single element)
         """
+        self.recent_prices.append(current_tick)
+
         should_rebalance = False
 
-        volatility = self.compute_volatility(recent_prices)
+        volatility = self.compute_volatility(self.recent_prices)
         band_width = current_tick * volatility * self.band_multiplier
         width = band_width * self.lp_width_multiplier
 

@@ -1,20 +1,18 @@
 """
-Volatility-Aware Single-Position Miner (MinimalMiner)
+Baseline Single-Position Miner (MinimalMiner)
 
 This module implements a minimal LP strategy where a single liquidity position
-recenters dynamically based on recent market volatility.
+recenters based on a fixed width.
 
 Key Features:
 - Single LP position
 - Rebalance triggered when price nears edges of current position
-- Position width scales with recent price volatility
+- Position width is fixed
 """
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import List
-from collections import deque
 
 # Configure logging
 logging.basicConfig(
@@ -41,62 +39,22 @@ class Inventory:
 
 
 class MinimalMiner:
-    """
-    Volatility-Aware Single-Position Miner.
-
-    Maintains a single LP position that recenters when the market price
-    approaches the edges of the position. Position width is proportional
-    to recent market volatility.
-
-    Attributes:
-        inventory (Inventory): Current inventory for LP positions
-        width_factor (float): Multiplier to scale position width with volatility
-        volatility_window (int): Number of recent prices used to compute volatility
-    """
 
     def __init__(
         self,
         inventory: Inventory,
-        width_factor: float = 3.0,
-        volatility_window: int = 5,
     ):
         """
         Initialize the miner with inventory and configuration.
 
         Args:
             inventory (Inventory): Initial token balances
-            width_factor (float, optional): Multiplier for volatility-based width
-            volatility_window (int, optional): Number of recent prices for volatility
+
         """
         self.inventory = inventory
         self.positions: List[Position] = []
-        self.width_factor = width_factor
-        self.volatility_window = volatility_window
-        self.recent_prices = deque(maxlen=volatility_window)
-        logger.info(
-            f"Starting Miner V1 with inventory: {inventory}, width factor: {width_factor} and volatility window: {volatility_window}"
-        )
 
-    def compute_volatility(self, recent_prices: List[int]) -> float:
-        """
-        Compute price volatility from recent prices.
-
-        Args:
-            recent_prices (List[int]): List of recent price ticks
-
-        Returns:
-            float: Standard deviation of relative price changes
-        """
-        if len(recent_prices) < self.volatility_window:
-            return 0.0
-
-        price_changes = [
-            (recent_prices[i] - recent_prices[i - 1]) / recent_prices[i - 1]
-            for i in range(1, len(recent_prices))
-        ]
-        mean = sum(price_changes) / len(price_changes)
-        variance = sum((x - mean) ** 2 for x in price_changes) / len(price_changes)
-        return math.sqrt(variance)
+        logger.info(f"Starting Miner V1 with inventory: {inventory}")
 
     def rebalance_query_handler(
         self,
@@ -118,7 +76,6 @@ class MinimalMiner:
         Returns:
             List[Position]: Updated list of LP positions (single element)
         """
-        self.recent_prices.append(current_tick)
 
         should_rebalance = False
 
@@ -134,13 +91,9 @@ class MinimalMiner:
                 should_rebalance = True
 
         if should_rebalance:
-            volatility = self.compute_volatility(self.recent_prices)
-            logger.info(
-                f"Calculated volatility factor as {volatility} using recent prices: {self.recent_prices}"
-            )
-            min_width = tick_spacing * 10
-            width = max(volatility * self.width_factor, min_width)
+            width = 2000  # Configurable width
 
+            # Snap to tick spacing (ticks must be multiples of spacing)
             center_tick = (current_tick // tick_spacing) * tick_spacing
             lower_tick = int((center_tick - width) // tick_spacing * tick_spacing)
             upper_tick = int((center_tick + width) // tick_spacing * tick_spacing)
