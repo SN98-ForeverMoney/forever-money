@@ -7,7 +7,6 @@ and eligibility filtering for evaluations.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from decimal import Decimal
-from datetime import datetime, timezone, timedelta
 
 from validator.models.miner_vault import MinerVault, VaultSnapshot
 from validator.repositories.vault import VaultRepository
