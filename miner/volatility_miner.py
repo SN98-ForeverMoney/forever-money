@@ -24,6 +24,9 @@ import bittensor as bt
 import os
 import sys
 import math
+import asyncio
+import httpx
+import json
 
 from collections import deque
 from typing import Optional, Tuple, Any, List
@@ -80,20 +83,38 @@ class SN98Miner:
         self.config = config
 
         # Vault configuration (optional - for miner-owned vaults)
-        self.vault_address = get_env_variable("MINER_VAULT_ADDRESS", str, None)
+        raw_vault_addresses = get_env_variable("MINER_VAULT_ADDRESSES", List, [])
+        self.vault_addresses = json.loads(raw_vault_addresses)
+        self.num_vault_addresses = len(self.vault_addresses)
         self.vault_chain_id = get_env_variable("MINER_VAULT_CHAIN_ID", int, 8453)
+        self.vault_executor_interval = get_env_variable(
+            "MINER_VAULT_EXECUTOR_INTERVAL", int, 900
+        )
+
+        # Executor bot configuration
+        self.executor_bot_url = get_env_variable("EXECUTOR_BOT_URL", str, None)
+        self.executor_bot_api_key = get_env_variable("EXECUTOR_BOT_API_KEY", str, None)
+
+        # current job data for vaults
+        self.vault_job_data = {vault: {} for vault in self.vault_addresses}
 
         # Volatility Miner Config
         self.width_factor = config.width_factor
         self.volatility_window = config.volatility_window
-        self.recent_prices = deque(maxlen=self.volatility_window)
+        self.recent_prices = {
+            vault: deque(maxlen=self.volatility_window)
+            for vault in self.vault_addresses
+        }
         logger.info(f"Width factor: {self.width_factor}")
         logger.info(f"Volatility window: {self.volatility_window}")
 
         logger.info(f"Starting SN98 Miner v{MINER_VERSION}")
         logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
-        if self.vault_address:
-            logger.info(f"Vault: {self.vault_address} (chain {self.vault_chain_id})")
+        if self.vault_addresses:
+            logger.info(f"Vaults: {self.vault_addresses} (chain {self.vault_chain_id})")
+
+        # todo: auth and auto fetch
+        self.miner_uid = 1
 
         # Create and configure axon
         self.axon = bt.Axon(wallet=wallet, config=config)
@@ -133,13 +154,31 @@ class SN98Miner:
 
         synapse.accepted = True
 
+        if self.vault_addresses:
+            self.vault_job_data = {
+                vault_address: {
+                    "vault_address": vault_address,
+                    "pair_address": synapse.pair_address,
+                    "sn_liquidity_manager_address": synapse.sn_liquidity_manager_address,
+                    "tick_spacing": synapse.tick_spacing,
+                    "current_price": synapse.current_price,
+                    "current_positions": synapse.current_positions,
+                    "inventory": synapse.inventory_remaining,
+                    "job_id": synapse.job_id,
+                    "round_id": synapse.round_id,
+                    "miner_uid": self.miner_uid,
+                }
+                for vault_address in self.vault_addresses or []
+            }
+
         # Simple Logic:
         # 1. If we have no positions, deploy a range.
         # 2. If we have positions, check if price is near the edge.
         # 3. If price is near edge, rebalance.
 
         current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(synapse.current_price)
-        self.recent_prices.append(current_tick)
+        for vault in self.vault_addresses:
+            self.recent_prices[vault].append(current_tick)
 
         should_rebalance = False
         if not synapse.current_positions:
@@ -162,32 +201,21 @@ class SN98Miner:
                 )
 
         if should_rebalance:
-            volatility = self.compute_volatility(self.recent_prices)
-            logger.info(
-                f"Calculated volatility factor as {volatility} using recent prices: {self.recent_prices}"
-            )
-            min_width = tick_spacing * 10
-            width = max(volatility * self.width_factor, min_width)
-
             tick_spacing = (
                 synapse.tick_spacing
             )  # From validator via liq_manager.get_tick_spacing()
 
-            # Snap to tick spacing (ticks must be multiples of spacing)
-            center_tick = (current_tick // tick_spacing) * tick_spacing
-            lower_tick = (center_tick - width) // tick_spacing * tick_spacing
-            upper_tick = (center_tick + width) // tick_spacing * tick_spacing
-
-            # Allocate all available inventory
-            # Note: validator will calculate actual amounts used based on price
-            new_pos = Position(
-                tick_lower=lower_tick,
-                tick_upper=upper_tick,
-                allocation0=synapse.inventory_remaining["amount0"],
-                allocation1=synapse.inventory_remaining["amount1"],
-            )
+            for vault in self.vault_addresses:
+                new_pos = self.compute_positions(
+                    vault_address=vault,
+                    current_tick=current_tick,
+                    tick_spacing=tick_spacing,
+                    inventory=synapse.inventory_remaining,
+                )
 
             synapse.desired_positions = [new_pos]
+            lower_tick = new_pos.tick_lower
+            upper_tick = new_pos.tick_upper
             logger.info(f"Proposing new position: [{lower_tick}, {upper_tick}]")
         else:
             # Keep current positions: return current_positions instead of None
@@ -195,6 +223,34 @@ class SN98Miner:
             logger.info("Keeping current positions.")
 
         return synapse
+
+    def compute_positions(
+        self, vault_address: str, current_tick: int, tick_spacing: int, inventory: dict
+    ) -> Position:
+        self.recent_prices[vault_address].append(current_tick)
+
+        volatility = self.compute_volatility(self.recent_prices[vault_address])
+        logger.info(
+            f"Calculated volatility factor as {volatility} using recent prices: {self.recent_prices}"
+        )
+        min_width = tick_spacing * 10
+        width = max(volatility * self.width_factor, min_width)
+
+        # Snap to tick spacing (ticks must be multiples of spacing)
+        center_tick = (current_tick // tick_spacing) * tick_spacing
+        lower_tick = (center_tick - width) // tick_spacing * tick_spacing
+        upper_tick = (center_tick + width) // tick_spacing * tick_spacing
+
+        # Allocate all available inventory
+        # Note: validator will calculate actual amounts used based on price
+        new_pos = Position(
+            tick_lower=lower_tick,
+            tick_upper=upper_tick,
+            allocation0=inventory["amount0"],
+            allocation1=inventory["amount1"],
+        )
+
+        return new_pos
 
     def compute_volatility(self, recent_prices: List[int]) -> float:
         """
@@ -289,11 +345,12 @@ class SN98Miner:
         """
         logger.info("Received VaultRegistrationQuery")
 
-        if self.vault_address:
+        if self.vault_addresses:
             synapse.has_vault = True
-            synapse.vault_address = self.vault_address
+            # setting only 1st vault for now
+            synapse.vault_address = self.vault_addresses[0]
             synapse.chain_id = self.vault_chain_id
-            logger.info(f"Responding with vault: {self.vault_address}")
+            logger.info(f"Responding with vault: {self.vault_addresses[0]}")
         else:
             synapse.has_vault = False
             logger.info("No vault configured, responding with has_vault=False")
@@ -327,6 +384,110 @@ class SN98Miner:
         """
         # Equal priority for all requests
         return 0.0
+
+    async def execute_vault_strategy(
+        self, vault_address: str, positions: List[Position]
+    ):
+        if not self.executor_bot_url:
+            logger.error("Executor bot URL not configured")
+            return
+
+        curr_vault_job_data = self.vault_job_data[vault_address]
+        payload = {
+            "api_key": self.executor_bot_api_key,
+            "job_id": curr_vault_job_data.get("job_id"),
+            "sn_liquidity_manager_address": curr_vault_job_data.get(
+                "sn_liquidity_manager_address"
+            ),
+            "pair_address": curr_vault_job_data.get("pair_address"),
+            "positions": [
+                {
+                    "tick_lower": p.tick_lower,
+                    "tick_upper": p.tick_upper,
+                    "allocation0": p.allocation0,
+                    "allocation1": p.allocation1,
+                }
+                for p in positions
+            ],
+            "round_id": curr_vault_job_data.get("round_id"),
+            "miner_uid": self.miner_uid,
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.executor_bot_url.rstrip('/')}/execute_strategy",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+
+            if response.status_code != 200:
+                logger.error(
+                    f"Executor bot error {response.status_code}: {response.text}"
+                )
+                return
+
+            data = response.json()
+            tx_hash = data.get("tx_hash")
+            logger.info(f"Vault strategy executed tx_hash={tx_hash}")
+        except Exception as e:
+            logger.error(f"Executor bot request failed: {e}")
+
+    async def run_vault_mining(self, vault_address: str):
+        if not self.vault_addresses:
+            logger.info("Vault(s) not setup, skipping executing vault strategy")
+            return
+
+        logger.info(f"Starting vault: {vault_address} mining loop...")
+        while True:
+            curr_vault_job_data = self.vault_job_data[vault_address]
+            try:
+                if not curr_vault_job_data or curr_vault_job_data.get("vault_address"):
+                    logger.info(
+                        f"Waiting for validator job configuration for vault: {vault_address}..."
+                    )
+                    await asyncio.sleep(self.vault_executor_interval)
+                    continue
+
+                current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(
+                    curr_vault_job_data.get("current_price")
+                )
+
+                current_position = curr_vault_job_data.get("current_positions")
+                new_position = self.compute_positions(
+                    vault_address,
+                    current_tick,
+                    curr_vault_job_data.get("tick_spacing"),
+                    curr_vault_job_data.get("inventory"),
+                )
+                if self._has_positions_changed([new_position], [current_position]):
+                    logger.info(
+                        f"Vault Mining: Positions changes detected. Current: {current_position}, New: {new_position}"
+                    )
+                    await self.execute_vault_strategy(vault_address, [new_position])
+                else:
+                    logger.info("Vault Mining: No New Positions detected.")
+
+            except Exception as e:
+                logger.error(f"Vault mining error: {e}")
+
+            await asyncio.sleep(self.vault_executor_interval)
+
+    def _has_positions_changed(
+        self, new_positions: List[Position], current_positions: List[Position]
+    ) -> bool:
+        """
+        Returns True if any tick_lower or tick_upper has changed in the positions list.
+        """
+        if len(new_positions) != len(current_positions):
+            return True
+
+        for new, curr in zip(new_positions, current_positions):
+            if new.tick_lower != curr.tick_lower or new.tick_upper != curr.tick_upper:
+                return True
+
+        return False
 
     def run(self):
         """
@@ -447,7 +608,7 @@ def get_config():
     return config
 
 
-def main():
+async def main():
     """
     Main entry point for the miner.
 
@@ -476,9 +637,18 @@ def main():
         config=config,
     )
 
-    # Run miner (synchronous Bittensor serving)
-    miner.run()
+    # Run Axon in a thread and vault mining(s) async
+    tasks = [
+        asyncio.create_task(asyncio.to_thread(miner.run())),
+    ]
+    for vault in miner.vault_addresses:
+        tasks.append(asyncio.create_task(miner.run_vault_mining(vault)))
+
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        logger.info("Tasks cancelled. Shutting down miner.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
