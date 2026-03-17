@@ -639,7 +639,7 @@ async def main():
 
     # Run Axon in a thread and vault mining(s) async
     tasks = [
-        asyncio.create_task(asyncio.to_thread(miner.run())),
+        asyncio.create_task(asyncio.to_thread(miner.run)),
     ]
     for vault in miner.vault_addresses:
         tasks.append(asyncio.create_task(miner.run_vault_mining(vault)))
