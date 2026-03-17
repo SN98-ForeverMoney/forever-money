@@ -83,7 +83,7 @@ class SN98Miner:
         self.config = config
 
         # Vault configuration (optional - for miner-owned vaults)
-        raw_vault_addresses = get_env_variable("MINER_VAULT_ADDRESSES", List, [])
+        raw_vault_addresses = get_env_variable("MINER_VAULT_ADDRESSES", str, "[]")
         self.vault_addresses = json.loads(raw_vault_addresses)
         self.num_vault_addresses = len(self.vault_addresses)
         self.vault_chain_id = get_env_variable("MINER_VAULT_CHAIN_ID", int, 8453)
