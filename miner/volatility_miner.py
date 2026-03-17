@@ -344,10 +344,12 @@ class SN98Miner:
             logger.error("Executor bot URL not configured")
             return
 
+        round_id = f"miner-vault-{vault_address[:10]}-{int(time.time())}"
         payload = {
             "api_key": self.executor_bot_api_key,
             "sn_liquidity_manager_address": vault_address,
             "pair_address": pool_address,
+            "round_id": round_id,
             "positions": [
                 {
                     "tick_lower": p.tick_lower,
