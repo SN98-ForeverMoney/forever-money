@@ -74,6 +74,7 @@ async def discover_vault_pool(vault_address: str, chain_id: int) -> Optional[str
         ("USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
         ("cbBTC", "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
         ("BID", "0xa1832f7F4e534aE557f9B5AB76dE54B1873e498B"),
+        ("xTAO", "0xb99FBE68c8A0cC14bE8c1AF73DD4DfEA8a76aDD7"),
         ("USDbC", "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"),
         ("DAI", "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"),
     ]
