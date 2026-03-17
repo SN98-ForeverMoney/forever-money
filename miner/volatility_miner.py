@@ -8,10 +8,7 @@ Key Features:
 - Single LP position
 - Rebalance triggered when price nears edges of current position
 - Position width scales with recent price volatility
-
-Uses rebalance-only protocol:
-- No StrategyRequest (removed)
-- Only RebalanceQuery for dynamic rebalancing decisions
+- Vault mining reads on-chain state directly (no validator dependency)
 
 Usage:
     python -m miner.volatility_miner --wallet.name <wallet_name> --wallet.hotkey <hotkey_name> --width_factor 3 --volatility_window 10
@@ -48,12 +45,67 @@ from protocol.synapses import RebalanceQuery
 from protocol.models import Position
 from validator.utils.env import MINER_VERSION, NETUID, SUBTENSOR_NETWORK, BT_WALLET_PATH
 from validator.utils.math import UniswapV3Math
+from validator.utils.web3 import AsyncWeb3Helper, ZERO_ADDRESS
+from validator.services.liqmanager import SnLiqManagerService
+from web3 import Web3
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+async def discover_vault_pool(vault_address: str, chain_id: int) -> Optional[str]:
+    """
+    Discover the pool address for a vault by querying on-chain state.
+
+    Checks common Base tokens to find which one is registered as an AK,
+    then reads the pool address from the position manager.
+
+    Returns the pool address or None if no pool is registered.
+    """
+    w3 = AsyncWeb3Helper.make_web3(chain_id)
+    lm = w3.make_contract_by_name("LiquidityManager", vault_address)
+
+    # Known tokens on Base to check
+    tokens_to_check = [
+        ("WETH", "0x4200000000000000000000000000000000000006"),
+        ("USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+        ("cbBTC", "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+        ("USDbC", "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"),
+        ("DAI", "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"),
+        ("BID", "0x68A633C682543090013B8C2d1eD0f47faeF76449"),
+    ]
+
+    for name, token in tokens_to_check:
+        try:
+            pm_addr = await lm.functions.akAddressToPositionManager(
+                Web3.to_checksum_address(token)
+            ).call()
+            if pm_addr == ZERO_ADDRESS:
+                continue
+
+            pm = w3.make_contract_by_name("AeroCLPositionManager", pm_addr)
+            pool_bytes = await pm.functions.pool().call()
+            # Pool address is the first 20 bytes of the bytes32
+            if isinstance(pool_bytes, bytes):
+                pool_address = "0x" + pool_bytes[:20].hex()
+            else:
+                pool_address = "0x" + str(pool_bytes)[:40]
+
+            # Verify it's a valid pool by calling slot0
+            pool_contract = w3.make_contract_by_name("ICLPool", pool_address)
+            await pool_contract.functions.slot0().call()
+
+            logger.info(
+                f"Discovered pool {pool_address} for vault {vault_address} (AK={name})"
+            )
+            return pool_address
+        except Exception:
+            continue
+
+    return None
 
 
 class SN98Miner:
@@ -95,8 +147,8 @@ class SN98Miner:
         self.executor_bot_url = get_env_variable("EXECUTOR_BOT_URL", str, None)
         self.executor_bot_api_key = get_env_variable("EXECUTOR_BOT_API_KEY", str, None)
 
-        # current job data for vaults
-        self.vault_job_data = {vault: {} for vault in self.vault_addresses}
+        # On-chain services per vault (populated during init_vault_services)
+        self.vault_liq_services: dict[str, SnLiqManagerService] = {}
 
         # Volatility Miner Config
         self.width_factor = config.width_factor
@@ -112,9 +164,6 @@ class SN98Miner:
         logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
         if self.vault_addresses:
             logger.info(f"Vaults: {self.vault_addresses} (chain {self.vault_chain_id})")
-
-        # todo: auth and auto fetch
-        self.miner_uid = 1
 
         # Create and configure axon
         self.axon = bt.Axon(wallet=wallet, config=config)
@@ -136,6 +185,28 @@ class SN98Miner:
         logger.info(f"Axon created on port {self.axon.port}")
         logger.info(f"Serving RebalanceQuery and VaultRegistrationQuery endpoints")
 
+    async def init_vault_services(self):
+        """
+        Discover pool addresses for each vault and initialize SnLiqManagerService instances.
+        Vaults without a registered pool are skipped.
+        """
+        for vault_address in self.vault_addresses:
+            pool_address = await discover_vault_pool(vault_address, self.vault_chain_id)
+            if pool_address is None:
+                logger.warning(
+                    f"Vault {vault_address} has no registered pool — skipping vault mining"
+                )
+                continue
+
+            self.vault_liq_services[vault_address] = SnLiqManagerService(
+                chain_id=self.vault_chain_id,
+                liquidity_manager_address=vault_address,
+                pool_address=pool_address,
+            )
+            logger.info(
+                f"Initialized on-chain service for vault {vault_address} -> pool {pool_address}"
+            )
+
     async def rebalance_query_handler(self, synapse: RebalanceQuery) -> RebalanceQuery:
         """
         Handle RebalanceQuery synapse from validators.
@@ -154,28 +225,6 @@ class SN98Miner:
 
         synapse.accepted = True
 
-        if self.vault_addresses:
-            self.vault_job_data = {
-                vault_address: {
-                    "vault_address": vault_address,
-                    "pair_address": synapse.pair_address,
-                    "sn_liquidity_manager_address": synapse.sn_liquidity_manager_address,
-                    "tick_spacing": synapse.tick_spacing,
-                    "current_price": synapse.current_price,
-                    "current_positions": synapse.current_positions,
-                    "inventory": synapse.inventory_remaining,
-                    "job_id": synapse.job_id,
-                    "round_id": synapse.round_id,
-                    "miner_uid": self.miner_uid,
-                }
-                for vault_address in self.vault_addresses or []
-            }
-
-        # Simple Logic:
-        # 1. If we have no positions, deploy a range.
-        # 2. If we have positions, check if price is near the edge.
-        # 3. If price is near edge, rebalance.
-
         current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(synapse.current_price)
         for vault in self.vault_addresses:
             self.recent_prices[vault].append(current_tick)
@@ -185,11 +234,9 @@ class SN98Miner:
             should_rebalance = True
             logger.info("No current positions. Rebalancing initialized.")
         else:
-            # Check existing positions
-            # Assuming we manage one main position for simplicity
             pos = synapse.current_positions[0]
             tick_width = pos.tick_upper - pos.tick_lower
-            buffer = tick_width * 0.2  # Rebalance if within 20% of edge
+            buffer = tick_width * 0.2
 
             if (
                 current_tick < pos.tick_lower + buffer
@@ -201,24 +248,18 @@ class SN98Miner:
                 )
 
         if should_rebalance:
-            tick_spacing = (
-                synapse.tick_spacing
-            )  # From validator via liq_manager.get_tick_spacing()
+            tick_spacing = synapse.tick_spacing
 
-            for vault in self.vault_addresses:
-                new_pos = self.compute_positions(
-                    vault_address=vault,
-                    current_tick=current_tick,
-                    tick_spacing=tick_spacing,
-                    inventory=synapse.inventory_remaining,
-                )
+            new_pos = self.compute_positions(
+                vault_address=self.vault_addresses[0] if self.vault_addresses else "eval",
+                current_tick=current_tick,
+                tick_spacing=tick_spacing,
+                inventory=synapse.inventory_remaining,
+            )
 
             synapse.desired_positions = [new_pos]
-            lower_tick = new_pos.tick_lower
-            upper_tick = new_pos.tick_upper
-            logger.info(f"Proposing new position: [{lower_tick}, {upper_tick}]")
+            logger.info(f"Proposing new position: [{new_pos.tick_lower}, {new_pos.tick_upper}]")
         else:
-            # Keep current positions: return current_positions instead of None
             synapse.desired_positions = list(synapse.current_positions)
             logger.info("Keeping current positions.")
 
@@ -227,11 +268,12 @@ class SN98Miner:
     def compute_positions(
         self, vault_address: str, current_tick: int, tick_spacing: int, inventory: dict
     ) -> Position:
+        self.recent_prices.setdefault(vault_address, deque(maxlen=self.volatility_window))
         self.recent_prices[vault_address].append(current_tick)
 
         volatility = self.compute_volatility(self.recent_prices[vault_address])
         logger.info(
-            f"Calculated volatility factor as {volatility} using recent prices: {self.recent_prices}"
+            f"Calculated volatility factor as {volatility} using recent prices: {list(self.recent_prices[vault_address])}"
         )
         min_width = tick_spacing * 10
         width = max(volatility * self.width_factor, min_width)
@@ -241,8 +283,6 @@ class SN98Miner:
         lower_tick = (center_tick - width) // tick_spacing * tick_spacing
         upper_tick = (center_tick + width) // tick_spacing * tick_spacing
 
-        # Allocate all available inventory
-        # Note: validator will calculate actual amounts used based on price
         new_pos = Position(
             tick_lower=lower_tick,
             tick_upper=upper_tick,
@@ -253,15 +293,6 @@ class SN98Miner:
         return new_pos
 
     def compute_volatility(self, recent_prices: List[int]) -> float:
-        """
-        Compute price volatility from recent prices.
-
-        Args:
-            recent_prices (List[int]): List of recent price ticks
-
-        Returns:
-            float: Standard deviation of relative price changes
-        """
         if len(recent_prices) < self.volatility_window:
             return 0.0
 
@@ -274,80 +305,21 @@ class SN98Miner:
         return math.sqrt(variance)
 
     def _should_accept_job(self, synapse: RebalanceQuery) -> Tuple[bool, Optional[str]]:
-        """
-        Determine if miner should accept this job.
-
-        Override this method to implement custom job filtering logic.
-
-        Args:
-            synapse: RebalanceQuery synapse
-
-        Returns:
-            Tuple of (should_accept, refusal_reason)
-        """
-        # By default, accept all jobs
-        # You can implement custom filtering logic here:
-        #
-        # Example 1: Only work on specific pairs
-        # accepted_pairs = ['0x123...', '0x456...']
-        # if synapse.pair_address not in accepted_pairs:
-        #     return False, "Only working on whitelisted pairs"
-        #
-        # Example 2: Only work on evaluation rounds
-        # if synapse.round_type == 'live':
-        #     return False, "Not participating in live rounds yet"
-        #
-        # Example 3: Check rebalance frequency (avoid spam)
-        # if synapse.rebalances_so_far >= 10:
-        #     return False, "Max rebalances reached"
-
         return True, None
 
     def blacklist_rebalance_query(self, synapse: RebalanceQuery) -> Tuple[bool, str]:
-        """
-        Blacklist function for RebalanceQuery.
-
-        Args:
-            synapse: RebalanceQuery synapse
-
-        Returns:
-            Tuple of (is_blacklisted, reason)
-        """
-        # Accept all requests
         return False, ""
 
     def priority_rebalance_query(self, synapse: RebalanceQuery) -> float:
-        """
-        Priority function for RebalanceQuery.
-
-        Args:
-            synapse: RebalanceQuery synapse
-
-        Returns:
-            Priority score
-        """
-        # Equal priority for all requests
         return 0.0
 
     async def vault_registration_handler(
         self, synapse: VaultRegistrationQuery
     ) -> VaultRegistrationQuery:
-        """
-        Handle VaultRegistrationQuery synapse from validators.
-
-        Returns the miner's vault address if configured.
-
-        Args:
-            synapse: VaultRegistrationQuery synapse
-
-        Returns:
-            VaultRegistrationQuery with vault info populated
-        """
         logger.info("Received VaultRegistrationQuery")
 
         if self.vault_addresses:
             synapse.has_vault = True
-            # setting only 1st vault for now
             synapse.vault_address = self.vault_addresses[0]
             synapse.chain_id = self.vault_chain_id
             logger.info(f"Responding with vault: {self.vault_addresses[0]}")
@@ -360,46 +332,22 @@ class SN98Miner:
     def blacklist_vault_registration(
         self, synapse: VaultRegistrationQuery
     ) -> Tuple[bool, str]:
-        """
-        Blacklist function for VaultRegistrationQuery.
-
-        Args:
-            synapse: VaultRegistrationQuery synapse
-
-        Returns:
-            Tuple of (is_blacklisted, reason)
-        """
-        # Accept all requests
         return False, ""
 
     def priority_vault_registration(self, synapse: VaultRegistrationQuery) -> float:
-        """
-        Priority function for VaultRegistrationQuery.
-
-        Args:
-            synapse: VaultRegistrationQuery synapse
-
-        Returns:
-            Priority score
-        """
-        # Equal priority for all requests
         return 0.0
 
     async def execute_vault_strategy(
-        self, vault_address: str, positions: List[Position]
+        self, vault_address: str, pool_address: str, positions: List[Position]
     ):
         if not self.executor_bot_url:
             logger.error("Executor bot URL not configured")
             return
 
-        curr_vault_job_data = self.vault_job_data[vault_address]
         payload = {
             "api_key": self.executor_bot_api_key,
-            "job_id": curr_vault_job_data.get("job_id"),
-            "sn_liquidity_manager_address": curr_vault_job_data.get(
-                "sn_liquidity_manager_address"
-            ),
-            "pair_address": curr_vault_job_data.get("pair_address"),
+            "sn_liquidity_manager_address": vault_address,
+            "pair_address": pool_address,
             "positions": [
                 {
                     "tick_lower": p.tick_lower,
@@ -409,8 +357,6 @@ class SN98Miner:
                 }
                 for p in positions
             ],
-            "round_id": curr_vault_job_data.get("round_id"),
-            "miner_uid": self.miner_uid,
         }
 
         try:
@@ -430,56 +376,93 @@ class SN98Miner:
 
             data = response.json()
             tx_hash = data.get("tx_hash")
-            logger.info(f"Vault strategy executed tx_hash={tx_hash}")
+            logger.info(f"Vault strategy executed for {vault_address} tx_hash={tx_hash}")
         except Exception as e:
             logger.error(f"Executor bot request failed: {e}")
 
     async def run_vault_mining(self, vault_address: str):
-        if not self.vault_addresses:
-            logger.info("Vault(s) not setup, skipping executing vault strategy")
+        """
+        Autonomous vault mining loop that reads on-chain state directly.
+        No dependency on validator RebalanceQuery.
+        """
+        liq_service = self.vault_liq_services.get(vault_address)
+        if liq_service is None:
+            logger.warning(
+                f"No on-chain service for vault {vault_address} — vault mining disabled"
+            )
             return
 
-        logger.info(f"Starting vault: {vault_address} mining loop...")
+        pool_address = liq_service.pool.address
+        logger.info(
+            f"Starting autonomous vault mining for {vault_address} (pool={pool_address})"
+        )
+
         while True:
-            curr_vault_job_data = self.vault_job_data[vault_address]
             try:
-                if not curr_vault_job_data or curr_vault_job_data.get("vault_address"):
-                    logger.info(
-                        f"Waiting for validator job configuration for vault: {vault_address}..."
+                # Read all state from chain
+                current_price, tick_spacing, current_positions, inventory = (
+                    await asyncio.gather(
+                        liq_service.get_current_price(),
+                        liq_service.get_tick_spacing(),
+                        liq_service.get_current_positions(),
+                        liq_service.get_inventory(),
                     )
-                    await asyncio.sleep(self.vault_executor_interval)
-                    continue
-
-                current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(
-                    curr_vault_job_data.get("current_price")
                 )
 
-                current_position = curr_vault_job_data.get("current_positions")
-                new_position = self.compute_positions(
-                    vault_address,
-                    current_tick,
-                    curr_vault_job_data.get("tick_spacing"),
-                    curr_vault_job_data.get("inventory"),
+                current_tick = UniswapV3Math.get_tick_from_sqrt_price_x96(current_price)
+                logger.info(
+                    f"Vault {vault_address}: tick={current_tick}, "
+                    f"positions={len(current_positions)}, "
+                    f"inventory=({inventory.amount0}, {inventory.amount1})"
                 )
-                if self._has_positions_changed([new_position], [current_position]):
-                    logger.info(
-                        f"Vault Mining: Positions changes detected. Current: {current_position}, New: {new_position}"
-                    )
-                    await self.execute_vault_strategy(vault_address, [new_position])
+
+                should_rebalance = False
+                if not current_positions:
+                    should_rebalance = True
+                    logger.info(f"Vault {vault_address}: No positions, will deploy.")
                 else:
-                    logger.info("Vault Mining: No New Positions detected.")
+                    pos = current_positions[0]
+                    tick_width = pos.tick_upper - pos.tick_lower
+                    buffer = tick_width * 0.2
+
+                    if (
+                        current_tick < pos.tick_lower + buffer
+                        or current_tick > pos.tick_upper - buffer
+                    ):
+                        should_rebalance = True
+                        logger.info(
+                            f"Vault {vault_address}: Price near edge [{pos.tick_lower}, {pos.tick_upper}]. Rebalancing."
+                        )
+
+                if should_rebalance:
+                    inv_dict = {"amount0": inventory.amount0, "amount1": inventory.amount1}
+                    new_position = self.compute_positions(
+                        vault_address, current_tick, tick_spacing, inv_dict
+                    )
+
+                    if not current_positions or self._has_positions_changed(
+                        [new_position], current_positions
+                    ):
+                        logger.info(
+                            f"Vault {vault_address}: Executing new position "
+                            f"[{new_position.tick_lower}, {new_position.tick_upper}]"
+                        )
+                        await self.execute_vault_strategy(
+                            vault_address, pool_address, [new_position]
+                        )
+                    else:
+                        logger.info(f"Vault {vault_address}: Position unchanged, skipping.")
+                else:
+                    logger.info(f"Vault {vault_address}: No rebalance needed.")
 
             except Exception as e:
-                logger.error(f"Vault mining error: {e}")
+                logger.error(f"Vault mining error for {vault_address}: {e}")
 
             await asyncio.sleep(self.vault_executor_interval)
 
     def _has_positions_changed(
         self, new_positions: List[Position], current_positions: List[Position]
     ) -> bool:
-        """
-        Returns True if any tick_lower or tick_upper has changed in the positions list.
-        """
         if len(new_positions) != len(current_positions):
             return True
 
@@ -490,28 +473,20 @@ class SN98Miner:
         return False
 
     def run(self):
-        """
-        Start the miner axon server.
-
-        This method blocks until the miner is stopped.
-        """
+        """Start the miner axon server."""
         logger.info("Starting axon server...")
 
-        # Start the axon
         self.axon.start()
 
-        # Serve the axon
         try:
             logger.info(f"Miner serving on {self.axon.ip}:{self.axon.port}")
             logger.info("Press Ctrl+C to stop")
 
-            # Keep the miner running
             self.axon.serve(
                 subtensor=self.subtensor,
                 netuid=self.config.netuid,
             )
 
-            # This blocks until interrupted
             bt.logging.info("Miner is running. Press Ctrl+C to stop.")
 
             while True:
@@ -529,15 +504,8 @@ class SN98Miner:
 
 
 def get_config():
-    """
-    Create and return configuration for the miner.
-
-    Returns:
-        bt.config object with all necessary configuration
-    """
     parser = argparse.ArgumentParser(description="SN98 ForeverMoney Miner")
 
-    # Wallet arguments
     parser.add_argument(
         "--wallet.name", type=str, required=True, default="default", help="Wallet name"
     )
@@ -555,12 +523,11 @@ def get_config():
         help="Wallet directory (default: BT_WALLET_PATH env or ~/.bittensor/wallets)",
     )
 
-    # Network arguments
     parser.add_argument(
         "--subtensor.network",
         type=str,
         default=None,
-        help=f"Subtensor network endpoint (e.g., ws://127.0.0.1:9944, wss://entrypoint-finney.opentensor.ai:443, or finney/test/local). Default: {SUBTENSOR_NETWORK}",
+        help=f"Subtensor network endpoint. Default: {SUBTENSOR_NETWORK}",
     )
     parser.add_argument(
         "--netuid",
@@ -569,7 +536,6 @@ def get_config():
         help=f"Network UID. Default: {NETUID}",
     )
 
-    # Miner strategy arguments
     parser.add_argument(
         "--width_factor",
         type=float,
@@ -586,62 +552,46 @@ def get_config():
 
     bt.Axon.add_args(parser)
 
-    # Parse config with bt.Config to get bittensor defaults
     config = bt.Config(parser)
 
-    # Override with CLI args or environment variables
-    # Priority: CLI args > env vars > defaults
     if hasattr(config, "subtensor") and hasattr(config, "subtensor.network"):
-        # CLI arg provided
         pass
     elif SUBTENSOR_NETWORK:
-        # Use env var
         config.subtensor.network = SUBTENSOR_NETWORK
 
     if hasattr(config, "netuid") and config.netuid is not None:
-        # CLI arg provided
         pass
     elif NETUID:
-        # Use env var
         config.netuid = NETUID
 
     return config
 
 
 async def main():
-    """
-    Main entry point for the miner.
-
-    Usage:
-        python -m miner.miner --wallet.name <wallet> --wallet.hotkey <hotkey>
-
-    All other configuration loaded from .env file.
-    """
-    # Get configuration
     config = get_config()
 
     logger.info(f"Config: {config}")
 
-    # Create wallet
     wallet = bt.Wallet(config=config)
     logger.info(f"Wallet: {wallet}")
 
-    # Create subtensor
     subtensor = bt.Subtensor(config=config)
     logger.info(f"Subtensor: {subtensor}")
 
-    # Create miner
     miner = SN98Miner(
         wallet=wallet,
         subtensor=subtensor,
         config=config,
     )
 
+    # Discover pools and init on-chain services before starting mining loops
+    await miner.init_vault_services()
+
     # Run Axon in a thread and vault mining(s) async
     tasks = [
         asyncio.create_task(asyncio.to_thread(miner.run)),
     ]
-    for vault in miner.vault_addresses:
+    for vault in miner.vault_liq_services:
         tasks.append(asyncio.create_task(miner.run_vault_mining(vault)))
 
     try:
