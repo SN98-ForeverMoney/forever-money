@@ -78,3 +78,7 @@ htmlcov/
 # Documentation builds
 docs/_build/
 site/
+
+
+# miner vault reports
+report*
