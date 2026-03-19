@@ -1,6 +1,8 @@
 import aiohttp
 import asyncio
 import logging
+import math
+import time
 from typing import Dict, Optional, Tuple
 
 import bittensor as bt
@@ -278,3 +280,77 @@ class PriceService:
                 f"No price returned from GeckoTerminal for {token_address} on {network}"
             )
         return float(price_str)
+
+    @staticmethod
+    async def get_historical_token_price(
+        token_address: str,
+        chain_id: int,
+        target_timestamp: int,
+    ) -> float:
+        """
+        Get token price in USD at a historical point in time from CoinGecko.
+
+        Uses the market_chart endpoint with enough days to cover the target timestamp,
+        then finds the closest price data point.
+
+        Args:
+            token_address: ERC20 token contract address.
+            chain_id: Chain ID (e.g. 8453 for Base).
+            target_timestamp: Unix timestamp (seconds) of the desired price point.
+
+        Raises:
+            ValueError: On invalid args (unknown chain_id, empty token_address).
+            RuntimeError: On fetch failure (timeout, HTTP error, no prices).
+
+        Returns:
+            Token price in USD at the closest available data point.
+        """
+        platform = PriceService.CHAIN_ID_TO_PLATFORM.get(chain_id)
+        if not platform:
+            raise ValueError(f"chain_id={chain_id} not in CHAIN_ID_TO_PLATFORM")
+
+        raw = (token_address or "").strip()
+        if not raw:
+            raise ValueError("empty token_address")
+        low = raw.lower()
+        addr = low if low.startswith("0x") else "0x" + low
+
+        # Calculate days needed to cover the target timestamp
+        now = int(time.time())
+        days_ago = math.ceil((now - target_timestamp) / 86400) + 1
+        days_ago = max(days_ago, 2)  # minimum 2 days for hourly granularity
+
+        url = (
+            f"{PriceService.BASE_URL}/coins/{platform}/contract/{addr}/market_chart"
+        )
+        params = {"vs_currency": "usd", "days": str(days_ago)}
+
+        try:
+            status, data = await PriceService._get_json(
+                url, params=params, retry_on_429=True
+            )
+            if status == 200:
+                prices = data.get("prices") or []
+                if not prices:
+                    raise RuntimeError(
+                        f"No prices returned for {token_address} on {platform}"
+                    )
+                # Find closest data point to target timestamp
+                target_ms = target_timestamp * 1000
+                closest = min(prices, key=lambda p: abs(p[0] - target_ms))
+                return float(closest[1])
+            raise RuntimeError(
+                f"CoinGecko returned status {status} "
+                f"for historical price of {token_address} on {platform}"
+            )
+        except (ValueError, RuntimeError):
+            raise
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"Timeout fetching historical token price for {token_address} "
+                f"(chain_id={chain_id})"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to fetch historical price for {token_address}: {e}"
+            ) from e

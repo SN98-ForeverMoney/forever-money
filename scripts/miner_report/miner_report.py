@@ -6,11 +6,11 @@ Reads on-chain state (Tier 1) and optionally enriches with database metrics (Tie
 to produce a consolidated view of vault positions, PnL, fees, and rebalance activity.
 
 Usage:
-    python scripts/miner_report.py                       # reads config from .env
-    python scripts/miner_report.py --vaults 0xABC,0xDEF  # override vault addresses
-    python scripts/miner_report.py --json                 # JSON output
-    python scripts/miner_report.py --no-db                # skip database queries
-    python scripts/miner_report.py --lookback-days 7      # fee lookback (default 30)
+    python scripts/miner_report/miner_report.py                       # reads config from .env
+    python scripts/miner_report/miner_report.py --vaults 0xABC,0xDEF  # override vault addresses
+    python scripts/miner_report/miner_report.py --json                 # JSON output
+    python scripts/miner_report/miner_report.py --no-db                # skip database queries
+    python scripts/miner_report/miner_report.py --lookback-days 7      # fee lookback (default 30)
 """
 
 import argparse
@@ -20,12 +20,13 @@ import logging
 import os
 import ssl
 import sys
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 # Allow imports from project root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from dotenv import load_dotenv
 
@@ -75,19 +76,18 @@ class DbMetrics:
     total_fees_usd: Optional[float] = None
     collection_count: int = 0
     rebalance_count: int = 0
-    # Token-denominated PnL
-    pnl0_human: float = 0.0
-    pnl1_human: float = 0.0
-    pnl0_usd: Optional[float] = None
-    pnl1_usd: Optional[float] = None
-    total_pnl_usd: Optional[float] = None
-    # HODL comparison (DB-based — requires indexed on-chain events in the pool events DB.
-    # If no events exist in the lookback window, e.g. for a newly deployed vault that
-    # hasn't had any rebalances or fee collections yet, values will be None.
-    # Data populates automatically once on-chain events are indexed into the DB.)
-    hodl_value_usd: Optional[float] = None  # Value if tokens were just held
-    lp_value_usd: Optional[float] = None  # Actual current vault value
-    hodl_delta_usd: Optional[float] = None  # LP - HODL (positive = LP outperformed)
+    # HODL vs Strategy comparison (uses swap events for historical pool prices
+    # and V3 math to compute starting token composition per position)
+    start_value_usd: Optional[float] = None  # Starting deployed tokens at historical USD prices
+    start_timestamp: Optional[int] = None  # Unix timestamp of effective start
+    hodl_value_usd: Optional[float] = None  # Starting tokens × current USD prices
+    hodl_pnl_usd: Optional[float] = None  # hodl_value - start_value
+    hodl_pnl_pct: Optional[float] = None
+    strategy_value_usd: Optional[float] = None  # Current positions + uncollected fees × current USD prices
+    strategy_pnl_usd: Optional[float] = None  # strategy_value - start_value
+    strategy_pnl_pct: Optional[float] = None
+    hodl_delta_usd: Optional[float] = None  # strategy_pnl - hodl_pnl (positive = LP outperformed)
+    hodl_delta_pct: Optional[float] = None
 
 
 @dataclass
@@ -134,7 +134,8 @@ class MinerReport:
     total_usd: Optional[float] = None
     total_uncollected_usd: Optional[float] = None
     total_fees_usd: Optional[float] = None
-    total_pnl_usd: Optional[float] = None
+    total_strategy_pnl_usd: Optional[float] = None
+    total_hodl_pnl_usd: Optional[float] = None
     total_hodl_delta_usd: Optional[float] = None
 
 
@@ -178,6 +179,20 @@ def fmt_amount(value: float, symbol: str, usd: Optional[float] = None) -> str:
         if value < 1200
         else f"{value:,.4f} {symbol}{usd_str}"
     )
+
+
+def fmt_signed_usd(value: float) -> str:
+    """Format a signed USD value with + or - prefix."""
+    sign = "+" if value >= 0 else "-"
+    return f"{sign}${abs(value):,.2f}"
+
+
+def fmt_pct(value: Optional[float]) -> str:
+    """Format a percentage value."""
+    if value is None:
+        return ""
+    sign = "+" if value >= 0 else ""
+    return f" ({sign}{value:.2f}%)"
 
 
 # ── On-chain fees (Tier 1) ──────────────────────────────────────────────────
@@ -397,24 +412,20 @@ async def build_vault_report(
     # 11. DB metrics (Tier 2)
     db_metrics = None
     if include_db and position_manager:
-        # Total tokens in vault (positions + unallocated + uncollected fees)
-        current_total0_human = (
-            sum(p.allocation0_human for p in position_reports) + s0 + uc0
-        )
-        current_total1_human = (
-            sum(p.allocation1_human for p in position_reports) + s1 + uc1
-        )
         db_metrics = await collect_db_metrics(
-            position_manager,
-            pool_address,
-            lookback_days,
-            dec0,
-            dec1,
-            price0_usd,
-            price1_usd,
-            chain_id,
-            current_total0_human=current_total0_human,
-            current_total1_human=current_total1_human,
+            position_manager=position_manager,
+            pool_address=pool_address,
+            lookback_days=lookback_days,
+            dec0=dec0,
+            dec1=dec1,
+            price0_usd=price0_usd,
+            price1_usd=price1_usd,
+            chain_id=chain_id,
+            token0_address=token0,
+            token1_address=token1,
+            current_sqrt_price_x96=sqrt_price_x96,
+            positions=positions,
+            uncollected_fees_usd=total_uc_usd,
         )
 
     return VaultReport(
@@ -456,39 +467,45 @@ async def collect_db_metrics(
     price0_usd: Optional[float],
     price1_usd: Optional[float],
     chain_id: int,
-    current_total0_human: float = 0.0,
-    current_total1_human: float = 0.0,
+    token0_address: str = "",
+    token1_address: str = "",
+    current_sqrt_price_x96: int = 0,
+    positions: list = None,
+    uncollected_fees_usd: Optional[float] = None,
 ) -> Optional[DbMetrics]:
-    """Query fee, rebalance, PnL, and HODL comparison data from pool events DB.
+    """Query fee/rebalance data and compute HODL vs Strategy comparison.
 
-    The HODL comparison reconstructs the vault's starting token balances from
-    mint/collect events in the DB. If no events exist in the lookback window
-    (e.g., a newly deployed vault), HODL values will be None. Data populates
-    automatically once rebalances/fee collections are indexed into the DB.
+    Uses swap events for historical pool prices and V3 math to reconstruct
+    starting token composition per position. Works for all vaults regardless
+    of whether they have rebalanced.
     """
+    if positions is None:
+        positions = []
+
     try:
         pm_clean = position_manager.lower().replace("0x", "")
 
         # Calculate lookback start block
         w3 = AsyncWeb3Helper.make_web3(chain_id)
         current_block = await w3.web3.eth.get_block_number()
-        start_block = current_block - (lookback_days * BASE_BLOCKS_PER_DAY)
+        lookback_start_block = current_block - (lookback_days * BASE_BLOCKS_PER_DAY)
 
         db = PoolDataDB()
 
         # Fetch events concurrently
         collect_events, mint_events, burn_events = await asyncio.gather(
-            db.get_collect_events(pool_address, start_block=start_block),
-            db.get_mint_events(pool_address, start_block=start_block),
-            db.get_burn_events(pool_address, start_block=start_block),
+            db.get_collect_events(pool_address, start_block=lookback_start_block),
+            db.get_mint_events(pool_address, start_block=0),  # all mints for position creation timing
+            db.get_burn_events(pool_address, start_block=lookback_start_block),
         )
 
         # Filter by owner == position manager
         my_collects = [e for e in collect_events if e["owner"] == pm_clean]
-        my_mints = [e for e in mint_events if e["owner"] == pm_clean]
+        all_my_mints = [e for e in mint_events if e["owner"] == pm_clean]
+        my_mints_in_window = [e for e in all_my_mints if e["block_number"] >= lookback_start_block]
         my_burns = [e for e in burn_events if e["owner"] == pm_clean]
 
-        # Aggregate fees
+        # Aggregate fees from collect events in lookback window
         total_fee0 = sum(int(e["amount0"]) for e in my_collects)
         total_fee1 = sum(int(e["amount1"]) for e in my_collects)
         fee0_human = wei_to_human(total_fee0, dec0)
@@ -501,41 +518,132 @@ async def collect_db_metrics(
             else None
         )
 
-        # PnL: tokens_out (burns + fees) - tokens_in (mints)
-        total_in0 = sum(int(e["amount0"]) for e in my_mints)
-        total_in1 = sum(int(e["amount1"]) for e in my_mints)
-        total_out0 = sum(int(e["amount0"]) for e in my_burns) + total_fee0
-        total_out1 = sum(int(e["amount1"]) for e in my_burns) + total_fee1
-        pnl0 = total_out0 - total_in0
-        pnl1 = total_out1 - total_in1
-        pnl0_human = wei_to_human(pnl0, dec0)
-        pnl1_human = wei_to_human(pnl1, dec1)
-        pnl0_usd = pnl0_human * price0_usd if price0_usd is not None else None
-        pnl1_usd = pnl1_human * price1_usd if price1_usd is not None else None
-        total_pnl_usd = (
-            (pnl0_usd + pnl1_usd)
-            if pnl0_usd is not None and pnl1_usd is not None
-            else None
-        )
+        # ── HODL vs Strategy comparison ──────────────────────────────────
+        # For each current position:
+        # 1. Derive liquidity from current allocations + current price
+        # 2. Find when position was created (earliest mint with matching ticks)
+        # 3. Clamp start to max(creation_block, lookback_start_block)
+        # 4. Get historical pool price at start from swap events
+        # 5. Compute starting token amounts via V3 math
+        start_value_usd = hodl_value_usd = strategy_value_usd = None
+        hodl_pnl_usd = strategy_pnl_usd = hodl_delta_usd = None
+        hodl_pnl_pct = strategy_pnl_pct = hodl_delta_pct = None
+        start_timestamp = None
 
-        # HODL comparison: what if we just held the starting tokens?
-        # Net token flow from LP activity = collects - mints (actual token transfers).
-        # Mints transfer tokens OUT of vault into pool; collects transfer tokens IN.
-        # Burns don't transfer tokens (just update owed amounts in the pool).
-        hodl_value_usd = lp_value_usd = hodl_delta_usd = None
-        has_events = len(my_mints) > 0 or len(my_collects) > 0
-        if has_events and price0_usd is not None and price1_usd is not None:
-            net_flow0_human = wei_to_human(total_fee0 - total_in0, dec0)
-            net_flow1_human = wei_to_human(total_fee1 - total_in1, dec1)
+        has_prices = price0_usd is not None and price1_usd is not None
+        has_positions = len(positions) > 0
 
-            start0 = current_total0_human - net_flow0_human
-            start1 = current_total1_human - net_flow1_human
+        if has_prices and has_positions:
+            total_start0_wei = 0
+            total_start1_wei = 0
+            effective_start_block = lookback_start_block
 
-            hodl_value_usd = start0 * price0_usd + start1 * price1_usd
-            lp_value_usd = (
-                current_total0_human * price0_usd + current_total1_human * price1_usd
-            )
-            hodl_delta_usd = lp_value_usd - hodl_value_usd
+            for pos in positions:
+                # 1. Derive liquidity from current on-chain state
+                L, _, _ = UniswapV3Math.position_liquidity_and_used_amounts(
+                    pos.tick_lower,
+                    pos.tick_upper,
+                    current_sqrt_price_x96,
+                    int(pos.allocation0),
+                    int(pos.allocation1),
+                )
+
+                # 2. Find earliest mint for this position's tick range
+                pos_mints = [
+                    m for m in all_my_mints
+                    if m["tick_lower"] == pos.tick_lower
+                    and m["tick_upper"] == pos.tick_upper
+                ]
+                if pos_mints:
+                    creation_block = pos_mints[0]["block_number"]  # events ordered by block
+                    # Hybrid clamp: use max(creation, lookback_start)
+                    pos_start_block = max(creation_block, lookback_start_block)
+                else:
+                    # Position created before any DB data — use lookback start
+                    pos_start_block = lookback_start_block
+
+                # Track the earliest effective start for timestamp/price lookup
+                if pos_start_block < effective_start_block or effective_start_block == lookback_start_block:
+                    effective_start_block = pos_start_block
+
+                # 3. Get historical pool price at start block from swap events
+                historical_sqrt_price = await db.get_sqrt_price_at_block(
+                    pool_address, pos_start_block
+                )
+                if historical_sqrt_price is None:
+                    logger.warning(
+                        f"No swap events at block {pos_start_block} for {pool_address}, "
+                        f"skipping HODL comparison"
+                    )
+                    break
+
+                # 4. Compute starting token amounts via V3 math
+                sqrtPA = UniswapV3Math.get_sqrt_ratio_at_tick(pos.tick_lower)
+                sqrtPB = UniswapV3Math.get_sqrt_ratio_at_tick(pos.tick_upper)
+                start_a0, start_a1 = UniswapV3Math.get_amounts_for_liquidity(
+                    historical_sqrt_price, sqrtPA, sqrtPB, L
+                )
+                total_start0_wei += start_a0
+                total_start1_wei += start_a1
+            else:
+                # All positions processed successfully (no break)
+                total_start0_human = wei_to_human(total_start0_wei, dec0)
+                total_start1_human = wei_to_human(total_start1_wei, dec1)
+
+                # Determine start timestamp from mint events or estimate
+                start_timestamp = _estimate_timestamp(
+                    effective_start_block, current_block, all_my_mints
+                )
+
+                # Fetch historical USD prices
+                hist_price0 = price0_usd
+                hist_price1 = price1_usd
+                if start_timestamp and token0_address and token1_address:
+                    try:
+                        hist_price0, hist_price1 = await asyncio.gather(
+                            PriceService.get_historical_token_price(
+                                token0_address, chain_id, start_timestamp
+                            ),
+                            PriceService.get_historical_token_price(
+                                token1_address, chain_id, start_timestamp
+                            ),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Historical price fetch failed: {e}, using current prices"
+                        )
+
+                # Compute values
+                start_value_usd = (
+                    total_start0_human * hist_price0
+                    + total_start1_human * hist_price1
+                )
+                hodl_value_usd = (
+                    total_start0_human * price0_usd
+                    + total_start1_human * price1_usd
+                )
+
+                # Strategy = current deployed tokens + uncollected fees
+                current_deployed0 = sum(
+                    wei_to_human(int(p.allocation0), dec0) for p in positions
+                )
+                current_deployed1 = sum(
+                    wei_to_human(int(p.allocation1), dec1) for p in positions
+                )
+                strategy_value_usd = (
+                    current_deployed0 * price0_usd
+                    + current_deployed1 * price1_usd
+                    + (uncollected_fees_usd or 0.0)
+                )
+
+                hodl_pnl_usd = hodl_value_usd - start_value_usd
+                strategy_pnl_usd = strategy_value_usd - start_value_usd
+                hodl_delta_usd = strategy_pnl_usd - hodl_pnl_usd
+
+                if start_value_usd > 0:
+                    hodl_pnl_pct = (hodl_pnl_usd / start_value_usd) * 100
+                    strategy_pnl_pct = (strategy_pnl_usd / start_value_usd) * 100
+                    hodl_delta_pct = (hodl_delta_usd / start_value_usd) * 100
 
         return DbMetrics(
             fee0_human=fee0_human,
@@ -544,19 +652,42 @@ async def collect_db_metrics(
             fee1_usd=fee1_usd,
             total_fees_usd=total_fees_usd,
             collection_count=len(my_collects),
-            rebalance_count=len(my_mints),
-            pnl0_human=pnl0_human,
-            pnl1_human=pnl1_human,
-            pnl0_usd=pnl0_usd,
-            pnl1_usd=pnl1_usd,
-            total_pnl_usd=total_pnl_usd,
+            rebalance_count=len(my_mints_in_window),
+            start_value_usd=start_value_usd,
+            start_timestamp=start_timestamp,
             hodl_value_usd=hodl_value_usd,
-            lp_value_usd=lp_value_usd,
+            hodl_pnl_usd=hodl_pnl_usd,
+            hodl_pnl_pct=hodl_pnl_pct,
+            strategy_value_usd=strategy_value_usd,
+            strategy_pnl_usd=strategy_pnl_usd,
+            strategy_pnl_pct=strategy_pnl_pct,
             hodl_delta_usd=hodl_delta_usd,
+            hodl_delta_pct=hodl_delta_pct,
         )
     except Exception as e:
         logger.warning(f"DB metrics collection failed: {e}")
         return None
+
+
+def _estimate_timestamp(
+    target_block: int, current_block: int, mint_events: list
+) -> int:
+    """Estimate a Unix timestamp for a block number.
+
+    Tries to find a mint event near the target block with a block_time.
+    Falls back to estimating from current time and block difference.
+    """
+    # Try to find an event with a timestamp near the target block
+    for event in mint_events:
+        bt = event.get("block_time")
+        if bt is not None:
+            # Estimate target timestamp from this event's known timestamp + block delta
+            block_delta = target_block - event["block_number"]
+            return int(bt) + (block_delta * 2)  # 2 seconds per block on Base
+
+    # Fallback: estimate from current time
+    block_delta = current_block - target_block
+    return int(time.time()) - (block_delta * 2)
 
 
 # ── Output formatting ────────────────────────────────────────────────────────
@@ -637,7 +768,7 @@ def print_report(report: MinerReport) -> None:
         # DB metrics (Tier 2)
         if v.db_metrics is not None:
             db = v.db_metrics
-            print(f"\n  Fees ({report.timestamp[:10]} lookback):")
+            print(f"\n  Fees ({report.params.lookback_days}d):")
             print(f"    {fmt_amount(db.fee0_human, v.token0_symbol, db.fee0_usd)}")
             print(f"    {fmt_amount(db.fee1_human, v.token1_symbol, db.fee1_usd)}")
             print(f"    Total Fees: {fmt_usd(db.total_fees_usd)}")
@@ -645,47 +776,29 @@ def print_report(report: MinerReport) -> None:
                 f"    Collections: {db.collection_count} | Rebalances: {db.rebalance_count}"
             )
 
-            # PnL section
-            def fmt_pnl(value: float, symbol: str, usd: Optional[float]) -> str:
-                sign = "+" if value >= 0 else ""
-                usd_str = ""
-                if usd is not None:
-                    usd_sign = "+" if usd >= 0 else ""
-                    usd_str = (
-                        f" ({usd_sign}${abs(usd):,.2f})"
-                        if usd >= 0
-                        else f" (-${abs(usd):,.2f})"
-                    )
-                if abs(value) < 1200:
-                    return f"{symbol}: {sign}{value:,.6f}{usd_str}"
-                return f"{symbol}: {sign}{value:,.4f}{usd_str}"
-
-            pnl_parts = [
-                fmt_pnl(db.pnl0_human, v.token0_symbol, db.pnl0_usd),
-                fmt_pnl(db.pnl1_human, v.token1_symbol, db.pnl1_usd),
-            ]
-            print(f"\n  PnL ({report.params.lookback_days}d, approximate):")
-            print(f"    {' | '.join(pnl_parts)}")
-            if db.total_pnl_usd is not None:
-                pnl_sign = "+" if db.total_pnl_usd >= 0 else "-"
-                print(f"    Net PnL: {pnl_sign}${abs(db.total_pnl_usd):,.2f}")
-
-            # HODL comparison (DB-based — requires indexed on-chain events)
+            # HODL vs Strategy comparison
             if db.hodl_delta_usd is not None:
+                start_date = ""
+                if db.start_timestamp:
+                    start_date = f" from {datetime.utcfromtimestamp(db.start_timestamp).strftime('%Y-%m-%d')}"
                 print(
-                    f"\n  HODL Comparison "
-                    f"({report.params.lookback_days}d, DB-based — requires indexed on-chain events):"
+                    f"\n  HODL vs Strategy ({report.params.lookback_days}d{start_date}):"
+                )
+                print(f"    Starting Value: {fmt_usd(db.start_value_usd)}")
+                print(
+                    f"    HODL (just hold):  {fmt_usd(db.hodl_value_usd)}  "
+                    f"PnL: {fmt_signed_usd(db.hodl_pnl_usd)}{fmt_pct(db.hodl_pnl_pct)}"
                 )
                 print(
-                    f"    HODL Value: {fmt_usd(db.hodl_value_usd)} | "
-                    f"LP Value: {fmt_usd(db.lp_value_usd)}"
+                    f"    Strategy (LP):     {fmt_usd(db.strategy_value_usd)}  "
+                    f"PnL: {fmt_signed_usd(db.strategy_pnl_usd)}{fmt_pct(db.strategy_pnl_pct)}"
                 )
-                delta_sign = "+" if db.hodl_delta_usd >= 0 else "-"
                 label = (
                     "LP outperformed" if db.hodl_delta_usd >= 0 else "HODL outperformed"
                 )
                 print(
-                    f"    LP vs HODL: {delta_sign}${abs(db.hodl_delta_usd):,.2f} ({label})"
+                    f"    LP vs HODL: {fmt_signed_usd(db.hodl_delta_usd)}"
+                    f"{fmt_pct(db.hodl_delta_pct)} ({label})"
                 )
 
     # Portfolio totals
@@ -696,14 +809,10 @@ def print_report(report: MinerReport) -> None:
         totals.append(f"Uncollected Fees: {fmt_usd(report.total_uncollected_usd)}")
     if report.total_fees_usd is not None:
         totals.append(f"Total Fees: {fmt_usd(report.total_fees_usd)}")
-    if report.total_pnl_usd is not None:
-        pnl_sign = "+" if report.total_pnl_usd >= 0 else "-"
-        totals.append(f"Net PnL: {pnl_sign}${abs(report.total_pnl_usd):,.2f}")
+    if report.total_strategy_pnl_usd is not None:
+        totals.append(f"Strategy PnL: {fmt_signed_usd(report.total_strategy_pnl_usd)}")
     if report.total_hodl_delta_usd is not None:
-        delta_sign = "+" if report.total_hodl_delta_usd >= 0 else "-"
-        totals.append(
-            f"LP vs HODL: {delta_sign}${abs(report.total_hodl_delta_usd):,.2f}"
-        )
+        totals.append(f"LP vs HODL: {fmt_signed_usd(report.total_hodl_delta_usd)}")
     print(f"  {' | '.join(totals)}")
     print(f"{'=' * 120}\n")
 
@@ -832,12 +941,18 @@ async def async_main(args: argparse.Namespace) -> None:
         if v.db_metrics is not None and v.db_metrics.total_fees_usd is not None
     ]
     total_fees_usd = sum(fee_totals) if fee_totals else None
-    pnl_totals = [
-        v.db_metrics.total_pnl_usd
+    strategy_pnl_totals = [
+        v.db_metrics.strategy_pnl_usd
         for v in vault_reports
-        if v.db_metrics is not None and v.db_metrics.total_pnl_usd is not None
+        if v.db_metrics is not None and v.db_metrics.strategy_pnl_usd is not None
     ]
-    total_pnl_usd = sum(pnl_totals) if pnl_totals else None
+    total_strategy_pnl_usd = sum(strategy_pnl_totals) if strategy_pnl_totals else None
+    hodl_pnl_totals = [
+        v.db_metrics.hodl_pnl_usd
+        for v in vault_reports
+        if v.db_metrics is not None and v.db_metrics.hodl_pnl_usd is not None
+    ]
+    total_hodl_pnl_usd = sum(hodl_pnl_totals) if hodl_pnl_totals else None
     hodl_delta_totals = [
         v.db_metrics.hodl_delta_usd
         for v in vault_reports
@@ -857,7 +972,8 @@ async def async_main(args: argparse.Namespace) -> None:
         total_usd=total_usd,
         total_uncollected_usd=total_uncollected_usd,
         total_fees_usd=total_fees_usd,
-        total_pnl_usd=total_pnl_usd,
+        total_strategy_pnl_usd=total_strategy_pnl_usd,
+        total_hodl_pnl_usd=total_hodl_pnl_usd,
         total_hodl_delta_usd=total_hodl_delta_usd,
     )
 

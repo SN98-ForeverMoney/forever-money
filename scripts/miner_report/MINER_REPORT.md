@@ -19,8 +19,7 @@ Miner operators need a consolidated view of their vault performance — position
 
 - Fees collected (from `base_poolcl_collects_v2` table, filtered by position manager owner)
 - Rebalance count (from `base_poolcl_mints_v2` table, filtered by position manager owner)
-- PnL calculation (from `base_poolcl_mints_v2`, `base_poolcl_burns_v2`, `base_poolcl_collects_v2`)
-- **HODL comparison** — reconstructs starting token balances from mint/collect events, compares to current vault value
+- **HODL vs Strategy PnL** — uses swap events for historical pool prices, V3 math for starting token composition, and CoinGecko `market_chart` for historical USD prices
 - DB connection built from `JOBS_POSTGRES_*` env vars with SSL support
 - Uses Tortoise ORM with `validator.models.pool_events` models
 
@@ -38,53 +37,70 @@ Miner operators need a consolidated view of their vault performance — position
 | Fees collected (token amounts + USD, over lookback period) | `CollectEvent` aggregation by owner                 | 2    |
 | Number of fee collections                                  | `CollectEvent` count                                | 2    |
 | Number of rebalances                                       | `MintEvent` count by owner                          | 2    |
-| PnL per token (burns + fees - mints, over lookback period) | `MintEvent` + `BurnEvent` + `CollectEvent`          | 2    |
-| Approximate PnL in USD (using current prices)              | PnL tokens \* current USD price                     | 2    |
-| HODL value (starting tokens at current prices)             | Reconstructed from `MintEvent` + `CollectEvent`     | 2    |
-| LP value (current vault tokens at current prices)          | Positions + unallocated + uncollected fees          | 2    |
-| LP vs HODL delta (positive = LP outperformed)              | LP value - HODL value                               | 2    |
+| Start value (USD at historical prices)                     | V3 math + swap events + CoinGecko `market_chart`    | 2    |
+| HODL value (starting tokens at current prices)             | Starting composition held to today                  | 2    |
+| HODL PnL (USD + %)                                         | `hodl_value - start_value`                          | 2    |
+| Strategy value (current deployed tokens at current prices) | Positions + uncollected fees at current prices      | 2    |
+| Strategy PnL (USD + %)                                     | `strategy_value - start_value`                      | 2    |
+| HODL delta (USD + %)                                       | `strategy_pnl - hodl_pnl` (positive = LP won)      | 2    |
 
-## PnL Calculation
+## HODL vs Strategy PnL (Tier 2, DB-based)
 
-PnL is calculated in **token-denominated terms** over the lookback period:
+Answers: **"How is the LP strategy performing vs simply holding the tokens?"**
+
+### Approach
+
+The old PnL (token-denominated: burns+fees-mints) and old HODL comparison have been replaced with a unified **HODL vs Strategy** comparison that uses historical USD prices for an accurate start value.
+
+**Scope: deployed tokens only** — unallocated inventory is excluded. Uncollected fees count toward Strategy value (they are part of the LP position's earned value).
+
+### Data Sources
+
+1. **Starting token composition**: Determined from the pool price at the start point using Uniswap V3 math. The pool price comes from **swap events** in the DB (`get_sqrt_price_at_block`), and V3 math (`get_amounts_for_liquidity`) computes token0/token1 amounts from the position's tick range and the pool's sqrtPriceX96 at that block.
+2. **Historical USD prices**: Fetched from CoinGecko's `market_chart` endpoint via `PriceService.get_historical_token_price(token_address, chain_id, target_timestamp)`. This gives accurate USD prices at the start point rather than using current prices as an approximation.
+3. **Current USD prices**: From `PriceService.get_token_price()` as before (CoinGecko/GeckoTerminal).
+
+### Hybrid Start Point
+
+The start timestamp uses a **hybrid** approach:
+- Default: lookback period start (e.g., 30 days ago)
+- Clamped to position creation (first `MintEvent` block_time) for positions newer than the lookback window
+
+This means the comparison window automatically adjusts for newer positions — you always compare from when the position was actually created, not from before it existed.
+
+### Formula
 
 ```
-tokens_in  = sum(amount0/amount1 from MintEvents)   # deposited into positions
-tokens_out = sum(amount0/amount1 from BurnEvents)    # withdrawn from positions
-           + sum(amount0/amount1 from CollectEvents)  # fees collected
+# Start point
+start_timestamp  = max(lookback_start, first_mint_block_time)   # hybrid clamp
+start_sqrt_price = get_sqrt_price_at_block(pool, start_block)   # from swap events
+start_token0, start_token1 = V3_math(position_ticks, start_sqrt_price, liquidity)
+start_price0_usd = get_historical_token_price(token0, chain_id, start_timestamp)
+start_price1_usd = get_historical_token_price(token1, chain_id, start_timestamp)
+start_value_usd  = start_token0 * start_price0_usd + start_token1 * start_price1_usd
 
-PnL (per token) = tokens_out - tokens_in
+# HODL: what if we just held the starting tokens?
+hodl_value_usd = start_token0 * current_price0_usd + start_token1 * current_price1_usd
+hodl_pnl_usd   = hodl_value_usd - start_value_usd
+hodl_pnl_pct   = hodl_pnl_usd / start_value_usd * 100
+
+# Strategy: actual LP performance (deployed tokens + uncollected fees)
+strategy_value_usd = current_deployed_token0 * current_price0_usd + current_deployed_token1 * current_price1_usd
+strategy_pnl_usd   = strategy_value_usd - start_value_usd
+strategy_pnl_pct   = strategy_pnl_usd / start_value_usd * 100
+
+# Delta: did LP beat HODL?
+hodl_delta_usd = strategy_pnl_usd - hodl_pnl_usd   # positive = LP outperformed
+hodl_delta_pct = strategy_pnl_pct - hodl_pnl_pct
 ```
 
-USD PnL is approximate — it uses **current** token prices, not historical prices at the time of each event. This is clearly labeled in the output.
+### Works for All Vaults
 
-All events are filtered by `owner == position_manager_address` (resolved via `akAddressToPositionManager`).
+The approach does **not** require mint/collect events for the PnL calculation itself. Swap events provide the historical pool price, and V3 math provides the token composition — this works for all vaults including non-rebalanced ones. Mint events are only used for the hybrid start-point clamp (to detect position creation time).
 
-## HODL Comparison (Tier 2, DB-based)
+### DB Dependency
 
-Answers: **"Would we have been better off just holding the tokens instead of LP'ing?"**
-
-### Why DB-only?
-
-A real HODL comparison requires knowing the vault's **starting token balances**. On-chain state (Tier 1) only shows the current snapshot — it can't tell us what the vault held before LP activity. The uncollected fees alone do NOT represent a valid HODL comparison because they ignore impermanent loss (IL). A vault could earn $10 in fees but suffer $15 in IL, meaning LP actually underperformed HODL by $5.
-
-With DB events, we reconstruct starting balances precisely:
-
-```
-net_flow_per_token = sum(collects) - sum(mints)           # actual token transfers in/out
-starting_tokens    = current_vault_tokens - net_flow       # reconstruct initial state
-current_vault_tokens = positions + unallocated + uncollected_fees
-
-hodl_value = starting_token0 * current_price0_usd + starting_token1 * current_price1_usd
-lp_value   = current_token0 * current_price0_usd + current_token1 * current_price1_usd
-delta      = lp_value - hodl_value    # positive = LP outperformed HODL
-```
-
-The delta captures both IL (negative) and fee income (positive) in one number.
-
-### DB dependency
-
-The HODL comparison relies entirely on mint/collect/burn events being indexed in the pool events database. For newly deployed vaults with no events yet (e.g., `0x88c6...`), the HODL section will not appear — same limitation as Tier 2 fees and PnL. Data populates automatically once rebalances or fee collections are triggered and indexed.
+The comparison relies on **swap events** being indexed in the pool events database (for historical pool prices). These are populated continuously from pool trading activity and do not depend on the vault having performed any rebalances or fee collections. The `pool.py` event methods now return a `block_time` field used for timestamp-based lookups.
 
 ## Environment Variables (loaded via dotenv from `.env`)
 
@@ -116,7 +132,8 @@ python scripts/miner_report/miner_report.py --verbose              # enable debu
 
 - `miner/volatility_miner.py:discover_vault_pool()` — pool discovery from vault address
 - `validator/services/liqmanager.py:SnLiqManagerService` — on-chain state (price, positions, inventory, pool tokens)
-- `validator/services/price.py:PriceService.get_token_price()` — USD prices via CoinGecko
+- `validator/services/price.py:PriceService.get_token_price()` — current USD prices via CoinGecko
+- `validator/services/price.py:PriceService.get_historical_token_price()` — historical USD prices via CoinGecko `market_chart` endpoint
 - `validator/utils/math.py:UniswapV3Math` — `sqrt_price_x96_to_price()`, `get_sqrt_ratio_at_tick()`
 - `validator/utils/web3.py:AsyncWeb3Helper` — ERC20 contract calls (symbol, decimals), `AeroCLPositionManager` contract for `claimFees()`
 - `validator/repositories/pool.py:PoolDataDB` — fee/event queries (`get_collect_events`, `get_mint_events`, `get_burn_events`)
@@ -135,10 +152,10 @@ python scripts/miner_report/miner_report.py --verbose              # enable debu
 ### 2. Data classes
 
 - `PositionReport`: tick_lower, tick_upper, price_lower, price_upper, width_ticks, allocation0/1 (human + USD), is_in_range
-- `DbMetrics`: fee0/1 (human + USD), total_fees_usd, collection_count, rebalance_count, pnl0/1 (human + USD), total_pnl_usd, hodl_value_usd, lp_value_usd, hodl_delta_usd
+- `DbMetrics`: fee0/1 (human + USD), total_fees_usd, collection_count, rebalance_count, start_value_usd, start_timestamp, hodl_value_usd, hodl_pnl_usd, hodl_pnl_pct, strategy_value_usd, strategy_pnl_usd, strategy_pnl_pct, hodl_delta_usd, hodl_delta_pct
 - `VaultReport`: vault/pool addresses, token symbols/decimals, current price/tick, unallocated inventory, positions list, total values, uncollected fees, optional DbMetrics
 - `ReportParams`: lookback_days, db_enabled, vault_source
-- `MinerReport`: timestamp, chain_id, params, list of VaultReports, totals (value, uncollected fees, historical fees, PnL, HODL delta)
+- `MinerReport`: timestamp, chain_id, params, list of VaultReports, totals (value, uncollected fees, historical fees, total_strategy_pnl_usd, total_hodl_pnl_usd)
 
 ### 3. Helper: `get_token_info(chain_id, token_address) -> (symbol, decimals)`
 
@@ -157,27 +174,25 @@ python scripts/miner_report/miner_report.py --verbose              # enable debu
 8. Calculate total deployed USD, unallocated USD, total vault value
 9. Resolve position manager via `resolve_position_manager()` (handles reverts gracefully)
 10. Tier 1: static call to `claimFees()` on position manager (with `from=vault_address`) for uncollected fees
-11. If `include_db`: compute total vault tokens (positions + unallocated + uncollected fees), pass to `collect_db_metrics()` for historical fees/rebalances/PnL/HODL
+11. If `include_db`: compute deployed tokens (positions + uncollected fees, excluding unallocated), pass to `collect_db_metrics()` for historical fees/rebalances and HODL vs Strategy PnL
 
-### 5. DB metrics: `collect_db_metrics(position_manager, ..., current_total0_human, current_total1_human) -> DbMetrics`
+### 5. DB metrics: `collect_db_metrics(position_manager, ..., deployed0_human, deployed1_human) -> DbMetrics`
 
-1. Receive pre-resolved position manager address and current vault token totals (positions + unallocated + uncollected fees)
+1. Receive pre-resolved position manager address and current deployed token totals (positions + uncollected fees, excluding unallocated)
 2. Calculate `start_block = current_block - (lookback_days * 43200)`
 3. Fetch concurrently: `get_collect_events`, `get_mint_events`, `get_burn_events` (all from `PoolDataDB`)
 4. Filter all events by `owner == position_manager_address` (lowercased, no 0x prefix)
 5. Aggregate fees: sum `amount0`/`amount1` from collect events
 6. Count rebalances: count of mint events
-7. Calculate PnL:
-    - `tokens_in` = sum of `amount0`/`amount1` from mint events
-    - `tokens_out` = sum of `amount0`/`amount1` from burn events + fee totals
-    - `pnl = tokens_out - tokens_in` (positive = profit)
-8. HODL comparison (only when events exist in lookback window):
-    - `net_flow = sum(collects) - sum(mints)` per token (actual transfers)
-    - `starting_tokens = current_vault_tokens - net_flow`
-    - `hodl_value = starting_tokens * current_prices`
-    - `lp_value = current_vault_tokens * current_prices`
-    - `hodl_delta = lp_value - hodl_value`
-9. Convert to human-readable and approximate USD using current prices
+7. HODL vs Strategy PnL:
+    - Determine hybrid start point: `max(lookback_start, first_mint_block_time)` using `block_time` from mint events
+    - Get historical pool price at start block via `get_sqrt_price_at_block()` (from swap events)
+    - Compute starting token composition using V3 math (`get_amounts_for_liquidity` with position ticks + start sqrtPriceX96)
+    - Fetch historical USD prices via `PriceService.get_historical_token_price(token, chain_id, start_timestamp)`
+    - Compute `start_value_usd = start_token0 * hist_price0 + start_token1 * hist_price1`
+    - Compute `hodl_value_usd = start_token0 * current_price0 + start_token1 * current_price1`
+    - Compute `strategy_value_usd = deployed0 * current_price0 + deployed1 * current_price1` (includes uncollected fees)
+    - Derive PnL and delta values (USD and %)
 
 ### 6. Output formatting: `print_report(report: MinerReport)`
 
@@ -218,16 +233,14 @@ Console-friendly plain text with sections per vault:
     Total Fees: $15.93
     Collections: 8 | Rebalances: 12
 
-  PnL (30d, approximate):
-    WETH: +0.005000 ($11.65) | BID: -1,234.5600 (-$10.57)
-    Net PnL: +$1.08
-
-  HODL Comparison (30d, DB-based — requires indexed on-chain events):
-    HODL Value: $110.00 | LP Value: $111.02
-    LP vs HODL: +$1.02 (LP outperformed)
+  HODL vs Strategy (30d):
+    Start: $105.00 (2026-02-17T12:00:00Z)
+    HODL:     $110.00 | PnL: +$5.00 (+4.76%)
+    Strategy: $111.02 | PnL: +$6.02 (+5.73%)
+    Delta: +$1.02 (+0.97%) — Strategy outperformed
 
 ========================================================================================================================
-  Portfolio Total: $111.02 | Uncollected Fees: $0.08 | Total Fees: $15.93 | Net PnL: +$1.08 | LP vs HODL: +$1.02
+  Portfolio Total: $111.02 | Uncollected Fees: $0.08 | Strategy PnL: +$6.02 | HODL PnL: +$5.00
 ========================================================================================================================
 
 ```
@@ -251,17 +264,20 @@ Console-friendly plain text with sections per vault:
 - **Token decimals**: Queried on-chain per token, not hardcoded (e.g. USDC=6, WETH=18).
 - **DB connection**: Built from `JOBS_POSTGRES_*` env vars. Uses SSL with `CERT_NONE` for remote connections (e.g. RDS).
 - **Base blocks per day**: 43,200 (2s block time). Used to compute `start_block` from `lookback_days`.
-- **PnL USD is approximate**: Uses current token prices, not historical. Labeled clearly in output.
-- **HODL comparison is DB-only**: Requires mint/collect events to reconstruct starting balances. On-chain state alone cannot determine historical token composition. Uncollected fees alone are NOT a valid HODL proxy — they ignore impermanent loss.
+- **HODL vs Strategy uses historical USD prices**: Start value is computed with CoinGecko `market_chart` prices at the start timestamp, not current prices. This gives accurate PnL.
+- **Scope is deployed tokens only**: Unallocated inventory is excluded from the HODL vs Strategy comparison. Uncollected fees count toward Strategy value (they are earned by the LP position).
+- **Hybrid start point**: Uses lookback start, clamped to position creation (first mint `block_time`) for newer positions.
+- **Works for all vaults**: Swap events provide historical pool price, V3 math provides starting token composition. No mint/collect events needed for non-rebalanced vaults.
+- **pool.py event methods return `block_time`**: Used for timestamp-based lookups and hybrid start-point clamping.
 - **Why DB over on-chain for events**: Fetching historical events from chain would require paginated `eth_getLogs` over ~1.3M blocks (30 days on Base), with most public RPCs limiting to ~10k blocks per request. The subgraph-indexed DB is orders of magnitude faster.
 
 ## Verification
 
-1. **Without DB**: Run `python scripts/miner_report.py --no-db` — shows positions, inventory, USD values, and uncollected fees (Tier 1). No fees/PnL/HODL sections.
-2. **With DB**: Run `python scripts/miner_report.py` — additionally shows historical fees, rebalances, PnL, and HODL comparison (Tier 2)
-3. **JSON mode**: Run `python scripts/miner_report.py --json` — valid JSON with `uncollected*` fields, `db_metrics` (including `hodl_value_usd`, `lp_value_usd`, `hodl_delta_usd`), and `total_hodl_delta_usd`
+1. **Without DB**: Run `python scripts/miner_report.py --no-db` — shows positions, inventory, USD values, and uncollected fees (Tier 1). No fees/HODL vs Strategy sections.
+2. **With DB**: Run `python scripts/miner_report.py` — additionally shows historical fees, rebalances, and HODL vs Strategy comparison (Tier 2)
+3. **JSON mode**: Run `python scripts/miner_report.py --json` — valid JSON with `uncollected*` fields, `db_metrics` (including `start_value_usd`, `start_timestamp`, `hodl_value_usd`, `hodl_pnl_usd`, `hodl_pnl_pct`, `strategy_value_usd`, `strategy_pnl_usd`, `strategy_pnl_pct`, `hodl_delta_usd`, `hodl_delta_pct`), and top-level `total_strategy_pnl_usd` / `total_hodl_pnl_usd`
 4. **Multiple vaults**: All 3 vaults from `MINER_VAULT_ADDRESSES` should report independently
 5. **Uncollected fees**: Should be non-zero for vaults with in-range positions
-6. **PnL consistency**: Verify `pnl = (burns + fees) - mints` matches displayed values
-7. **HODL comparison**: Positive delta = LP outperformed HODL; negative = HODL would have been better. Only appears when DB events exist in lookback window.
-8. **New vaults**: HODL/PnL/fees show `None`/`$0` until first rebalance/collection is indexed in DB
+6. **HODL vs Strategy**: Positive `hodl_delta_usd` = Strategy outperformed HODL; negative = HODL would have been better. Uses historical USD prices for start value.
+7. **Hybrid start**: For positions newer than the lookback window, the start point should clamp to position creation time (first mint `block_time`)
+8. **Non-rebalanced vaults**: HODL vs Strategy should still work — swap events provide price, V3 math provides token amounts

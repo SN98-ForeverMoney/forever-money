@@ -274,6 +274,7 @@ class PoolDataDB(DataSource):
         events = await query.order_by("evt_block_number").values(
             "evt_block_number",
             "evt_tx_hash",
+            "evt_block_time",
             "tick_lower",
             "tick_upper",
             "amount",
@@ -288,6 +289,7 @@ class PoolDataDB(DataSource):
             {
                 "block_number": e["evt_block_number"],
                 "transaction_hash": e["evt_tx_hash"],
+                "block_time": e["evt_block_time"],
                 "tick_lower": e["tick_lower"],
                 "tick_upper": e["tick_upper"],
                 "amount": e["amount"],
@@ -322,6 +324,7 @@ class PoolDataDB(DataSource):
         events = await query.order_by("evt_block_number").values(
             "evt_block_number",
             "evt_tx_hash",
+            "evt_block_time",
             "tick_lower",
             "tick_upper",
             "amount",
@@ -335,6 +338,7 @@ class PoolDataDB(DataSource):
             {
                 "block_number": e["evt_block_number"],
                 "transaction_hash": e["evt_tx_hash"],
+                "block_time": e["evt_block_time"],
                 "tick_lower": e["tick_lower"],
                 "tick_upper": e["tick_upper"],
                 "amount": e["amount"],
@@ -368,6 +372,7 @@ class PoolDataDB(DataSource):
         events = await query.order_by("evt_block_number").values(
             "evt_block_number",
             "evt_tx_hash",
+            "evt_block_time",
             "tick_lower",
             "tick_upper",
             "amount0",
@@ -381,6 +386,7 @@ class PoolDataDB(DataSource):
             {
                 "block_number": e["evt_block_number"],
                 "transaction_hash": e["evt_tx_hash"],
+                "block_time": e["evt_block_time"],
                 "tick_lower": e["tick_lower"],
                 "tick_upper": e["tick_upper"],
                 "amount0": e["amount0"],
