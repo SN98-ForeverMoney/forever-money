@@ -48,6 +48,8 @@ from validator.utils.math import UniswapV3Math
 from validator.utils.web3 import AsyncWeb3Helper, ZERO_ADDRESS
 from validator.services.liqmanager import SnLiqManagerService
 from web3 import Web3
+from validator.models.job import init_db, close_db
+from miner.utils.mining_repository import MiningRepository
 
 # Configure logging
 logging.basicConfig(
@@ -161,8 +163,20 @@ class SN98Miner:
         logger.info(f"Width factor: {self.width_factor}")
         logger.info(f"Volatility window: {self.volatility_window}")
 
+        # Miner identity for DB tracking
+        self.miner_hotkey = wallet.hotkey.ss58_address
+        self.miner_uid: Optional[int] = None
+        try:
+            metagraph = subtensor.metagraph(config.netuid)
+            if self.miner_hotkey in metagraph.hotkeys:
+                self.miner_uid = metagraph.hotkeys.index(self.miner_hotkey)
+        except Exception as e:
+            logger.warning(f"Could not resolve miner UID from metagraph: {e}")
+
+        self.mining_repo = MiningRepository(self.miner_uid, self.miner_hotkey, self.width_factor)
+
         logger.info(f"Starting SN98 Miner v{MINER_VERSION}")
-        logger.info(f"Wallet: {wallet.hotkey.ss58_address}")
+        logger.info(f"Wallet: {self.miner_hotkey} (uid={self.miner_uid})")
         if self.vault_addresses:
             logger.info(f"Vaults: {self.vault_addresses} (chain {self.vault_chain_id})")
 
@@ -339,28 +353,37 @@ class SN98Miner:
         return 0.0
 
     async def execute_vault_strategy(
-        self, vault_address: str, pool_address: str, positions: List[Position]
+        self,
+        vault_address: str,
+        pool_address: str,
+        positions: List[Position],
+        snapshot=None,
     ):
         if not self.executor_bot_url:
             logger.error("Executor bot URL not configured")
             return
 
         round_id = f"miner-vault-{vault_address[:10]}-{int(time.time())}"
+        positions_data = [
+            {
+                "tick_lower": p.tick_lower,
+                "tick_upper": p.tick_upper,
+                "allocation0": p.allocation0,
+                "allocation1": p.allocation1,
+            }
+            for p in positions
+        ]
         payload = {
             "api_key": self.executor_bot_api_key,
             "sn_liquidity_manager_address": vault_address,
             "pair_address": pool_address,
             "round_id": round_id,
-            "positions": [
-                {
-                    "tick_lower": p.tick_lower,
-                    "tick_upper": p.tick_upper,
-                    "allocation0": p.allocation0,
-                    "allocation1": p.allocation1,
-                }
-                for p in positions
-            ],
+            "positions": positions_data,
         }
+
+        tx_hash = None
+        executor_status_code = None
+        error = None
 
         try:
             async with httpx.AsyncClient() as client:
@@ -371,17 +394,30 @@ class SN98Miner:
                     timeout=30,
                 )
 
+            executor_status_code = response.status_code
             if response.status_code != 200:
+                error = response.text
                 logger.error(
                     f"Executor bot error {response.status_code}: {response.text}"
                 )
-                return
-
-            data = response.json()
-            tx_hash = data.get("tx_hash")
-            logger.info(f"Vault strategy executed for {vault_address} tx_hash={tx_hash}")
+            else:
+                data = response.json()
+                tx_hash = data.get("tx_hash")
+                logger.info(f"Vault strategy executed for {vault_address} tx_hash={tx_hash}")
         except Exception as e:
+            error = str(e)
             logger.error(f"Executor bot request failed: {e}")
+
+        await self.mining_repo.create_mining_execution(
+            snapshot=snapshot,
+            vault_address=vault_address,
+            pool_address=pool_address,
+            round_id=round_id,
+            positions_data=positions_data,
+            executor_status_code=executor_status_code,
+            tx_hash=tx_hash,
+            error=error,
+        )
 
     async def run_vault_mining(self, vault_address: str):
         """
@@ -420,8 +456,10 @@ class SN98Miner:
                 )
 
                 should_rebalance = False
+                rebalance_reason = None
                 if not current_positions:
                     should_rebalance = True
+                    rebalance_reason = "no_positions"
                     logger.info(f"Vault {vault_address}: No positions, will deploy.")
                 else:
                     pos = current_positions[0]
@@ -433,9 +471,17 @@ class SN98Miner:
                         or current_tick > pos.tick_upper - buffer
                     ):
                         should_rebalance = True
+                        rebalance_reason = "price_near_edge"
                         logger.info(
                             f"Vault {vault_address}: Price near edge [{pos.tick_lower}, {pos.tick_upper}]. Rebalancing."
                         )
+
+                volatility = self.compute_volatility(self.recent_prices.get(vault_address, deque()))
+                min_width = tick_spacing * 10
+                computed_width = max(volatility * self.width_factor, min_width)
+
+                new_position = None
+                execution_triggered = False
 
                 if should_rebalance:
                     inv_dict = {"amount0": inventory.amount0, "amount1": inventory.amount1}
@@ -446,17 +492,35 @@ class SN98Miner:
                     if not current_positions or self._has_positions_changed(
                         [new_position], current_positions
                     ):
+                        execution_triggered = True
                         logger.info(
                             f"Vault {vault_address}: Executing new position "
                             f"[{new_position.tick_lower}, {new_position.tick_upper}]"
-                        )
-                        await self.execute_vault_strategy(
-                            vault_address, pool_address, [new_position]
                         )
                     else:
                         logger.info(f"Vault {vault_address}: Position unchanged, skipping.")
                 else:
                     logger.info(f"Vault {vault_address}: No rebalance needed.")
+
+                snapshot = await self.mining_repo.save_mining_snapshot(
+                    vault_address=vault_address,
+                    pool_address=pool_address,
+                    current_tick=current_tick,
+                    current_price=current_price,
+                    tick_spacing=tick_spacing,
+                    current_positions=current_positions,
+                    inventory=inventory,
+                    volatility=volatility,
+                    computed_width=computed_width,
+                    rebalance_reason=rebalance_reason,
+                    new_position=new_position,
+                    execution_triggered=execution_triggered,
+                )
+
+                if execution_triggered:
+                    await self.execute_vault_strategy(
+                        vault_address, pool_address, [new_position], snapshot=snapshot
+                    )
 
             except Exception as e:
                 logger.error(f"Vault mining error for {vault_address}: {e}")
@@ -587,6 +651,13 @@ async def main():
         config=config,
     )
 
+    # Initialize DB for tracking
+    try:
+        await init_db()
+        logger.info("Database initialized for miner tracking")
+    except Exception as e:
+        logger.warning(f"Could not initialize DB — tracking disabled: {e}")
+
     # Discover pools and init on-chain services before starting mining loops
     await miner.init_vault_services()
 
@@ -601,6 +672,11 @@ async def main():
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         logger.info("Tasks cancelled. Shutting down miner.")
+    finally:
+        try:
+            await close_db()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
