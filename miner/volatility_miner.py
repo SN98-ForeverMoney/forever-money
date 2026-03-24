@@ -304,10 +304,47 @@ class SN98Miner:
         min_width = tick_spacing * 10
         width = max(volatility * self.width_factor, min_width)
 
-        # Snap to tick spacing (ticks must be multiples of spacing)
-        center_tick = (current_tick // tick_spacing) * tick_spacing
-        lower_tick = (center_tick - width) // tick_spacing * tick_spacing
-        upper_tick = (center_tick + width) // tick_spacing * tick_spacing
+        # Offset the center based on inventory imbalance so the position
+        # absorbs the dominant token.  In V3, if current_tick is near the
+        # upper bound the position is mostly token1; near the lower bound
+        # it is mostly token0.
+        #
+        # Strategy: place current_tick at a fraction of the range that
+        # mirrors the value split.  With no price oracle we use raw
+        # amounts as a rough proxy (works when both tokens are similar
+        # order-of-magnitude in value — good enough for a first pass).
+        amount0 = int(inventory["amount0"]) if inventory["amount0"] else 0
+        amount1 = int(inventory["amount1"]) if inventory["amount1"] else 0
+        total = amount0 + amount1
+
+        if total > 0:
+            # frac = share of token0 in total inventory (raw amounts).
+            # frac ≈ 1 → heavy token0 → shift range up (tick near lower bound)
+            # frac ≈ 0 → heavy token1 → shift range down (tick near upper bound)
+            frac0 = amount0 / total
+            # Place current tick so that frac0 portion of the range is below it.
+            # offset from bottom: frac0 * 2*width  (centered = width)
+            offset_from_bottom = frac0 * 2 * width
+        else:
+            offset_from_bottom = width  # centered
+
+        # Snap to tick spacing
+        lower_tick = int((current_tick - offset_from_bottom) // tick_spacing) * tick_spacing
+        upper_tick = int(lower_tick + 2 * width) // tick_spacing * tick_spacing
+
+        # Ensure range is at least min_width and current tick is inside
+        if upper_tick <= lower_tick + tick_spacing:
+            upper_tick = lower_tick + int(2 * width // tick_spacing) * tick_spacing
+        if current_tick <= lower_tick:
+            lower_tick = (current_tick // tick_spacing - 1) * tick_spacing
+        if current_tick >= upper_tick:
+            upper_tick = (current_tick // tick_spacing + 1) * tick_spacing
+
+        logger.info(
+            f"compute_positions: tick={current_tick} amount0={amount0} amount1={amount1} "
+            f"frac0={amount0/total if total > 0 else 0:.4f} width={width} "
+            f"range=[{lower_tick}, {upper_tick}]"
+        )
 
         new_pos = Position(
             tick_lower=lower_tick,
