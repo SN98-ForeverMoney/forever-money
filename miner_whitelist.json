@@ -10,5 +10,9 @@
   {
     "name": "1XBT - mainnet",
     "hotkey": "5DRixFFJ2JTQVFhVg5GQpgCGP7xA33SncmmNFw22LuhLVv7T"
+  },
+  {
+    "name": "FM miner",
+    "hotkey": "5GC5Scw2HT2H9qdrGth3bwVpL7qEpkkbPdyfxQmLYSLQC46w"
   }
 ]
