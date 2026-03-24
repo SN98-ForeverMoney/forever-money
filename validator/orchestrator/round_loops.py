@@ -241,6 +241,7 @@ async def run_with_miner_for_evaluation(
             current_block,
             initial_inventory,
             job.fee_rate,
+            baseline_positions=initial_positions,
         )
     except ValueError as e:
         logger.warning(
@@ -488,6 +489,7 @@ async def run_with_miners_batch_for_evaluation(
                 current_block,
                 initial_inventory,
                 job.fee_rate,
+                baseline_positions=initial_positions,
             )
         except ValueError as e:
             logger.warning(
@@ -642,6 +644,7 @@ async def run_with_miner_for_live(
             current_block,
             initial_inventory,
             job.fee_rate,
+            baseline_positions=initial_positions,
         )
     except ValueError as e:
         logger.warning(

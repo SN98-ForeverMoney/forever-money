@@ -8,7 +8,7 @@ concentrated liquidity positions, including:
 - Rebalance simulation following strategy rules
 """
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 from protocol import Position, Inventory
 from validator.repositories.pool import DataSource
@@ -79,6 +79,61 @@ class BacktesterService:
         share = min(1.0, simulated_in_range_liquidity / pool_liquidity)
         return share
 
+    def _simulate_fees_for_positions(
+        self,
+        positions: List[Position],
+        swap_events: List[Dict[str, Any]],
+        fee_rate: float,
+    ) -> Tuple[float, float, int]:
+        """
+        Simulate fee accumulation for a set of static positions over swap events.
+
+        Returns:
+            (fees0, fees1, in_range_count)
+        """
+        total_fees0 = 0.0
+        total_fees1 = 0.0
+        in_range_count = 0
+
+        for event in swap_events:
+            sqrt_price_x96 = int(event.get("sqrt_price_x96"))
+            total_in_range_liq = 0
+            for position in positions:
+                sqrt_price_lower_x96 = UniswapV3Math.get_sqrt_ratio_at_tick(
+                    position.tick_lower
+                )
+                sqrt_price_upper_x96 = UniswapV3Math.get_sqrt_ratio_at_tick(
+                    position.tick_upper
+                )
+                if sqrt_price_lower_x96 <= sqrt_price_x96 <= sqrt_price_upper_x96:
+                    in_range_count += 1
+                    (
+                        position_liquidity,
+                        _,
+                        _,
+                    ) = UniswapV3Math.position_liquidity_and_used_amounts(
+                        position.tick_lower,
+                        position.tick_upper,
+                        sqrt_price_x96,
+                        int(position.allocation0),
+                        int(position.allocation1),
+                    )
+                    total_in_range_liq += position_liquidity
+
+            raw_amount0 = float(event.get("amount0", 0) or 0)
+            raw_amount1 = float(event.get("amount1", 0) or 0)
+
+            liquidity_share = self._calculate_liquidity_share(
+                total_in_range_liq, event,
+            )
+
+            if raw_amount0 > 0:
+                total_fees0 += int(raw_amount0 * fee_rate * liquidity_share)
+            elif raw_amount1 > 0:
+                total_fees1 += int(raw_amount1 * fee_rate * liquidity_share)
+
+        return total_fees0, total_fees1, in_range_count
+
     async def evaluate_positions_performance(
         self,
         pair_address: str,
@@ -87,9 +142,15 @@ class BacktesterService:
         end_block: int,
         initial_inventory: Inventory,
         fee_rate: float,
+        baseline_positions: List[Position] = None,
     ) -> Dict[str, Any]:
         """
-        Simulate a single LP position over a block range using V3 concentrated liquidity math.
+        Simulate a miner's LP positions over a block range using V3 concentrated liquidity math.
+
+        Scores the miner's strategy against a baseline:
+        - If baseline_positions is provided, the baseline is the performance of
+          those positions (the current on-chain positions) over the same period.
+        - Otherwise falls back to HODL of the initial inventory.
 
         Args:
             pair_address: Pool address
@@ -98,16 +159,10 @@ class BacktesterService:
             end_block: Ending block
             initial_inventory: The inventory at the start of the simulation.
             fee_rate: Fee rate for the pool
+            baseline_positions: Current on-chain positions to use as baseline
 
         Returns:
-            Dictionary containing:
-            - fees_collected: Total fees earned (in token1 terms)
-            - final_amount0: Amount of token0 at end
-            - final_amount1: Amount of token1 at end
-            - impermanent_loss: IL as fraction (0.0 to 1.0)
-            - fees0: Fees in token0
-            - fees1: Fees in token1
-            - in_range_ratio: Fraction of time price was in range
+            Dictionary with performance metrics including initial_value and final_value
         """
 
         # Handle empty rebalance history (miner returned no positions)
@@ -127,7 +182,7 @@ class BacktesterService:
                 "amount1_deployed": 0,
                 "amount0_holdings": int(initial_inventory.amount0),
                 "amount1_holdings": int(initial_inventory.amount1),
-                "final_sqrt_price_x96": 0,  # Will be updated below if needed
+                "final_sqrt_price_x96": 0,
             }
 
         rebalance_history.sort(key=lambda x: x["block"], reverse=True)
@@ -145,23 +200,20 @@ class BacktesterService:
             pair_address, start_block, end_block
         )
 
-        # Track fees
+        # Track miner's fees
         total_fees0 = 0.0
         total_fees1 = 0.0
         in_range_count = 0
         total_swaps = len(swap_events)
         logger.info(f"Got {total_swaps} swaps for pair {pair_address}.")
-        # Simulate each swap for fee accumulation
+
+        # Simulate each swap for fee accumulation (miner's strategy)
         for event in swap_events:
-            # TODO: make debug only
-            logger.info(f"[{pair_address}] Simulating event {event}")
-            # Calculate price from sqrt_price_x96 if available
             sqrt_price_x96 = int(event.get("sqrt_price_x96"))
             block_number = int(event.get("block_number"))
             positions = get_deployed_positions(block_number)
             total_in_range_liq = 0
             for position in positions:
-                # Convert tick bounds to prices
                 sqrt_price_lower_x96 = UniswapV3Math.get_sqrt_ratio_at_tick(
                     position.tick_lower
                 )
@@ -169,11 +221,8 @@ class BacktesterService:
                     position.tick_upper
                 )
 
-                # Check if position is in range
                 if sqrt_price_lower_x96 <= sqrt_price_x96 <= sqrt_price_upper_x96:
                     in_range_count += 1
-                    # Calculate position liquidity AND actual amounts deployed
-                    # In V3, you can't always deploy all tokens - only what fits the limiting token
                     (
                         position_liquidity,
                         amount0_deployed,
@@ -187,20 +236,14 @@ class BacktesterService:
                     )
                     total_in_range_liq += position_liquidity
 
-            # Get swap amounts (signed: positive = token came IN, negative = token went OUT)
-            # In Uniswap V3, fees are ONLY charged on the INPUT token
             raw_amount0 = float(event.get("amount0", 0) or 0)
             raw_amount1 = float(event.get("amount1", 0) or 0)
 
-            # Calculate liquidity share for this swap
             liquidity_share = self._calculate_liquidity_share(
                 total_in_range_liq,
                 event,
             )
 
-            # Fees earned ONLY on the input token (the one with positive amount)
-            # If amount0 > 0: user swapped token0 for token1, fee is on token0
-            # If amount1 > 0: user swapped token1 for token0, fee is on token1
             if raw_amount0 > 0:
                 total_fees0 += int(raw_amount0 * fee_rate * liquidity_share)
             elif raw_amount1 > 0:
@@ -222,14 +265,10 @@ class BacktesterService:
             )
 
         # price in Q192 (token1/token0)
-        final_price_x192 = (
-            final_sqrt_price_x96 * final_sqrt_price_x96
-        )  # equivalent of final_sqrt_price_x96 ^ 2
-        initial_price_x192 = (
-            initial_sqrt_price_x96 * initial_sqrt_price_x96
-        )
+        final_price_x192 = final_sqrt_price_x96 * final_sqrt_price_x96
+        initial_price_x192 = initial_sqrt_price_x96 * initial_sqrt_price_x96
 
-        # get amounts currently in pool
+        # Miner's final deployed amounts
         amount0_deployed, amount1_deployed = 0, 0
         for position in rebalance_history[0]["new_positions"]:
             _, amount0, amount1 = UniswapV3Math.position_liquidity_and_used_amounts(
@@ -244,40 +283,93 @@ class BacktesterService:
 
         final_inventory: Inventory = rebalance_history[0]["inventory"]
 
-        # HODL value (token1 units, int-only)
-        # IMPORTANT: HODL uses INITIAL inventory, valued at FINAL price
-        hodl_value_deployed = (
-            int(initial_inventory.amount0) * final_price_x192
-        ) // UniswapV3Math.Q192 + int(initial_inventory.amount1)
-
-        # LP value (token1 units, int-only)
-        # deployed + idle
+        # Miner's LP value (deployed + idle)
         amount0_holdings = amount0_deployed + int(final_inventory.amount0)
         amount1_holdings = amount1_deployed + int(final_inventory.amount1)
-
-        lp_value_deployed = (
+        lp_value = (
             amount0_holdings * final_price_x192
         ) // UniswapV3Math.Q192 + amount1_holdings
 
-        # Fees (valued in token1 units)
+        # Miner's fees (valued in token1 units)
         fees_collected = (
             total_fees0 * final_price_x192
         ) // UniswapV3Math.Q192 + total_fees1
-        
-        # Initial Value (at start price)
-        initial_value = (
-            int(initial_inventory.amount0) * initial_price_x192
-        ) // UniswapV3Math.Q192 + int(initial_inventory.amount1)
-        
-        # Final Value (LP + Fees)
-        final_value = lp_value_deployed + fees_collected
 
-        # Impermanent loss (ratio, float only at the very end)
-        if hodl_value_deployed > 0:
+        # Miner's final value
+        final_value = lp_value + fees_collected
+
+        # --- Baseline: current on-chain position performance ---
+        if baseline_positions and len(baseline_positions) > 0:
+            # Simulate baseline positions over the same swaps
+            baseline_fees0, baseline_fees1, _ = self._simulate_fees_for_positions(
+                baseline_positions, swap_events, fee_rate,
+            )
+
+            # Baseline deployed amounts at final price
+            baseline_a0_deployed, baseline_a1_deployed = 0, 0
+            for pos in baseline_positions:
+                _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
+                    pos.tick_lower, pos.tick_upper, final_sqrt_price_x96,
+                    int(pos.allocation0), int(pos.allocation1),
+                )
+                baseline_a0_deployed += int(a0)
+                baseline_a1_deployed += int(a1)
+
+            # Baseline idle = initial inventory minus what baseline deployed at start
+            baseline_a0_deployed_start, baseline_a1_deployed_start = 0, 0
+            for pos in baseline_positions:
+                _, a0, a1 = UniswapV3Math.position_liquidity_and_used_amounts(
+                    pos.tick_lower, pos.tick_upper, initial_sqrt_price_x96,
+                    int(pos.allocation0), int(pos.allocation1),
+                )
+                baseline_a0_deployed_start += int(a0)
+                baseline_a1_deployed_start += int(a1)
+
+            baseline_idle0 = int(initial_inventory.amount0) - baseline_a0_deployed_start
+            baseline_idle1 = int(initial_inventory.amount1) - baseline_a1_deployed_start
+            baseline_idle0 = max(0, baseline_idle0)
+            baseline_idle1 = max(0, baseline_idle1)
+
+            baseline_a0_total = baseline_a0_deployed + baseline_idle0
+            baseline_a1_total = baseline_a1_deployed + baseline_idle1
+
+            baseline_lp_value = (
+                baseline_a0_total * final_price_x192
+            ) // UniswapV3Math.Q192 + baseline_a1_total
+
+            baseline_fees = (
+                baseline_fees0 * final_price_x192
+            ) // UniswapV3Math.Q192 + baseline_fees1
+
+            initial_value = baseline_lp_value + baseline_fees
+
+            logger.info(
+                f"[BACKTESTER] Baseline (current position): value={initial_value}, "
+                f"fees=({baseline_fees0:.0f}, {baseline_fees1:.0f}), "
+                f"deployed=({baseline_a0_deployed}, {baseline_a1_deployed}), "
+                f"idle=({baseline_idle0}, {baseline_idle1})"
+            )
+        else:
+            # Fallback: HODL baseline
+            initial_value = (
+                int(initial_inventory.amount0) * initial_price_x192
+            ) // UniswapV3Math.Q192 + int(initial_inventory.amount1)
+
+        logger.info(
+            f"[BACKTESTER] Miner: final_value={final_value}, lp_value={lp_value}, "
+            f"fees=({total_fees0:.0f}, {total_fees1:.0f}), "
+            f"deployed=({amount0_deployed}, {amount1_deployed}), "
+            f"baseline_initial_value={initial_value}"
+        )
+
+        # Impermanent loss (relative to HODL — kept for penalty calculation)
+        hodl_value = (
+            int(initial_inventory.amount0) * final_price_x192
+        ) // UniswapV3Math.Q192 + int(initial_inventory.amount1)
+        if hodl_value > 0:
             impermanent_loss = max(
                 0.0,
-                float(hodl_value_deployed - lp_value_deployed)
-                / float(hodl_value_deployed),
+                float(hodl_value - lp_value) / float(hodl_value),
             )
         else:
             impermanent_loss = 0.0
