@@ -49,6 +49,14 @@ from validator.utils.web3 import AsyncWeb3Helper, ZERO_ADDRESS
 from validator.services.liqmanager import SnLiqManagerService
 from web3 import Web3
 from validator.models.job import init_db, close_db
+from validator.utils.env import (
+    JOBS_POSTGRES_USER,
+    JOBS_POSTGRES_PASSWORD,
+    JOBS_POSTGRES_HOST,
+    JOBS_POSTGRES_PORT,
+    JOBS_POSTGRES_DB,
+    JOBS_POSTGRES_SCHEMA,
+)
 from miner.utils.mining_repository import MiningRepository
 
 # Configure logging
@@ -653,7 +661,8 @@ async def main():
 
     # Initialize DB for tracking
     try:
-        await init_db()
+        db_url = f"postgres://{JOBS_POSTGRES_USER}:{JOBS_POSTGRES_PASSWORD}@{JOBS_POSTGRES_HOST}:{JOBS_POSTGRES_PORT}/{JOBS_POSTGRES_DB}"
+        await init_db(db_url, schema=JOBS_POSTGRES_SCHEMA)
         logger.info("Database initialized for miner tracking")
     except Exception as e:
         logger.warning(f"Could not initialize DB — tracking disabled: {e}")
