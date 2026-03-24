@@ -9,10 +9,13 @@ Design:
   Else fallback to token-delta loss. Zero loss ⇒ penalty = 1.
 - Optional **in_range_ratio** bonus: reward time-in-range (more fee opportunity).
 """
+import logging
 import math
 from typing import Dict, Any, List, Tuple
 
 from validator.models.job import Job
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_LOSS_PENALTY = 10.0
@@ -71,10 +74,17 @@ class Scorer:
         initial_value = metrics.get("initial_value")
         final_value = metrics.get("final_value")
         if initial_value is None or final_value is None:
+            logger.info(
+                f"[SCORER] SCORE_MIN: initial_value={initial_value}, final_value={final_value} "
+                f"(missing value). metrics_keys={list(metrics.keys())}"
+            )
             return SCORE_MIN
         initial_value = float(initial_value)
         final_value = float(final_value)
         if initial_value <= 0:
+            logger.info(
+                f"[SCORER] SCORE_MIN: initial_value={initial_value} <= 0"
+            )
             return SCORE_MIN
 
         return_pct = (final_value - initial_value) / initial_value
@@ -88,12 +98,20 @@ class Scorer:
         else:
             score = return_pct / penalty if penalty > 0 else return_pct
 
+        in_range_ratio = None
         if DEFAULT_IN_RANGE_WEIGHT > 0 and "in_range_ratio" in metrics:
             r = metrics["in_range_ratio"]
             if r is not None:
                 r = max(0.0, min(1.0, float(r)))
+                in_range_ratio = r
                 score *= (1.0 - DEFAULT_IN_RANGE_WEIGHT) + DEFAULT_IN_RANGE_WEIGHT * r
         score = max(SCORE_MIN, min(SCORE_MAX, float(score)))
+
+        logger.info(
+            f"[SCORER] initial_value={initial_value}, final_value={final_value}, "
+            f"return_pct={return_pct:.6f}, loss_ratio={loss_ratio:.6f}, penalty={penalty:.6f}, "
+            f"in_range_ratio={in_range_ratio}, final_score={score:.6f}"
+        )
         return score
 
     @staticmethod

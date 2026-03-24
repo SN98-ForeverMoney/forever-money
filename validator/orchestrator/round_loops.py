@@ -446,6 +446,10 @@ async def run_with_miners_batch_for_evaluation(
     results: Dict[int, Dict[str, Any]] = {}
     for uid in miner_uids:
         if uid in per_miner_refused:
+            logger.info(
+                f"[ROUND={round_.round_id}] Miner {uid} refused/failed: "
+                f"reason={per_miner_refused[uid]} → score=0.0"
+            )
             results[uid] = {
                 "accepted": False,
                 "refusal_reason": per_miner_refused[uid],
@@ -460,6 +464,10 @@ async def run_with_miners_batch_for_evaluation(
             continue
         history = per_miner_history[uid]
         if not history:
+            logger.info(
+                f"[ROUND={round_.round_id}] Miner {uid} accepted but never rebalanced "
+                f"(positions always within tolerance or no change) → score=0.0"
+            )
             results[uid] = {
                 "accepted": True,
                 "refusal_reason": None,

@@ -112,6 +112,11 @@ class BacktesterService:
 
         # Handle empty rebalance history (miner returned no positions)
         if not rebalance_history:
+            logger.warning(
+                f"[BACKTESTER] Empty rebalance history for pair {pair_address} "
+                f"(blocks {start_block}-{end_block}). Miner never rebalanced — "
+                f"returning zero metrics (no initial_value/final_value → scorer will return SCORE_MIN)"
+            )
             return {
                 "fees_collected": 0,
                 "impermanent_loss": 0.0,

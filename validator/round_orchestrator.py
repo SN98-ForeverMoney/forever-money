@@ -220,6 +220,11 @@ class AsyncRoundOrchestrator:
         except Exception as e:
             logger.error(f"Error querying miner {miner_uid} for vault: {e}")
 
+    @staticmethod
+    def _job_tag(job: Job) -> str:
+        """Return a short log prefix like [weth-bid (job_id)]."""
+        return f"[{job.job_id}]"
+
     async def run_job_continuously(self, job: Job):
         """
             Run a job continuously with dual-mode rounds.
@@ -227,8 +232,8 @@ class AsyncRoundOrchestrator:
         Args:
             job: Job to run
         """
-
-        logger.info(f"Starting continuous operation for job {job.job_id}")
+        tag = self._job_tag(job)
+        logger.info(f"{tag} Starting continuous operation")
         if job.job_id not in self.round_numbers:
             await self._initialize_round_numbers(job)
         while True:
@@ -238,11 +243,11 @@ class AsyncRoundOrchestrator:
                     self.run_live_round(job),
                 )
                 logger.info(
-                    f"Job {job.job_id}: Sleeping for {job.round_duration_seconds} s"
+                    f"{tag} Sleeping for {job.round_duration_seconds} s"
                 )
                 await asyncio.sleep(job.round_duration_seconds)
             except Exception as e:
-                logger.error(f"Error in job {job.job_id}: {e}")
+                logger.error(f"{tag} Error: {e}")
                 await asyncio.sleep(job.round_duration_seconds)
 
     async def run_evaluation_round(self, job: Job):
@@ -273,8 +278,9 @@ class AsyncRoundOrchestrator:
             if (my_uid is None or uid != my_uid)
             and is_miner_whitelisted(self.metagraph.hotkeys[uid])
         ]
+        tag = self._job_tag(job)
         if not active_uids:
-            logger.warning("No active miners found.")
+            logger.warning(f"{tag} No active miners found.")
             return
 
         # Filter miners by vault eligibility if required
@@ -286,13 +292,13 @@ class AsyncRoundOrchestrator:
                 require_minimum_balance=True,
             )
             logger.info(
-                f"Vault filtering: {len(active_uids)} active miners -> "
+                f"{tag} Vault filtering: {len(active_uids)} active miners -> "
                 f"{len(eligible_uids)} with eligible vaults"
             )
             active_uids = eligible_uids
 
             if len(active_uids) == 0:
-                logger.warning("No miners with eligible vaults found.")
+                logger.warning(f"{tag} No miners with eligible vaults found.")
                 return
 
         self.round_numbers[job.job_id]["evaluation"] += 1
@@ -307,11 +313,11 @@ class AsyncRoundOrchestrator:
         self.round_numbers[job.job_id]["evaluation"] = round_obj.round_number
         round_number = round_obj.round_number
         logger.info("=" * 60)
-        logger.info(f"Starting EVALUATION round #{round_number} for job {job.job_id}")
+        logger.info(f"{tag} Starting EVALUATION round #{round_number}")
         logger.info("=" * 60)
         inventory = await liq_manager.get_inventory()
         initial_positions = await liq_manager.get_current_positions()
-        logger.info(f"Loaded {len(initial_positions)} initial positions from on-chain")
+        logger.info(f"{tag} Loaded {len(initial_positions)} initial positions, inventory=({inventory.amount0}, {inventory.amount1})")
 
         try:
             scores = await self._evaluate_miners(
@@ -325,14 +331,23 @@ class AsyncRoundOrchestrator:
             )
 
             winner = await select_winner(self.job_repository, job.job_id, scores)
+
+            # Debug: log all scores for this round
+            for uid, data in scores.items():
+                logger.info(
+                    f"{tag} SCORE miner={uid} accepted={data['accepted']} "
+                    f"score={data['score']:.6f} "
+                    f"metrics={data['result'].get('performance_metrics', {})}"
+                )
+
             if winner:
                 logger.info(
-                    f"Winner (evaluation round #{round_number}, job {job.job_id}): "
+                    f"{tag} Winner (eval round #{round_number}): "
                     f"Miner UID={winner['miner_uid']}, score={winner['score']:.4f}, "
                     f"hotkey={winner['hotkey']}"
                 )
             else:
-                logger.warning(f"No winner for evaluation round {round_number}")
+                logger.warning(f"{tag} No winner for evaluation round {round_number}")
 
             await self.job_repository.complete_round(
                 round_id=round_obj.round_id,
@@ -342,7 +357,7 @@ class AsyncRoundOrchestrator:
                 },
             )
         except Exception as e:
-            logger.error(f"Evaluation round failed for job {job.job_id}: {e}")
+            logger.error(f"{tag} Evaluation round failed: {e}", exc_info=True)
             await self.job_repository.complete_round(
                 round_id=round_obj.round_id,
                 winner_uid=None,
@@ -370,7 +385,7 @@ class AsyncRoundOrchestrator:
         for i in range(0, len(items), SCORE_UPDATE_BATCH_SIZE):
             batch = items[i : i + SCORE_UPDATE_BATCH_SIZE]
             await asyncio.gather(*[_update_one(uid, data) for uid, data in batch])
-        logger.info(f"Completed evaluation round {round_number}")
+        logger.info(f"{tag} Completed evaluation round {round_number}")
 
     async def _select_winner(
         self, job_id: str, scores: Dict[int, Dict]
@@ -380,10 +395,11 @@ class AsyncRoundOrchestrator:
 
     async def run_live_round(self, job: Job) -> None:
         """Run a live round with the first eligible miner from evaluation ranking."""
+        tag = self._job_tag(job)
         ranking = await self.job_repository.get_evaluation_round_ranking(job.job_id)
         if not ranking:
             logger.info(
-                f"No evaluation ranking for job {job.job_id}, skipping live round"
+                f"{tag} No evaluation ranking, skipping live round"
             )
             return
         eligible_uids = {
@@ -398,7 +414,7 @@ class AsyncRoundOrchestrator:
                 break
         if winner_uid is None:
             logger.info(
-                f"No eligible miners for live round (tried: {ranking}), skipping"
+                f"{tag} No eligible miners for live round (tried: {ranking}), skipping"
             )
             return
 
@@ -408,7 +424,7 @@ class AsyncRoundOrchestrator:
         is_eligible = any(s.miner_uid == winner_uid for s in miner_score)
         if not is_eligible:
             logger.info(
-                f"Miner {winner_uid} not eligible for live round yet (participation requirement)"
+                f"{tag} Miner {winner_uid} not eligible for live round yet (participation requirement)"
             )
             return
 
@@ -421,12 +437,12 @@ class AsyncRoundOrchestrator:
             )
             if not has_vault:
                 logger.info(
-                    f"Miner {winner_uid} not eligible for live round (no verified vault)"
+                    f"{tag} Miner {winner_uid} not eligible for live round (no verified vault)"
                 )
                 return
 
         logger.info(f"=" * 60)
-        logger.info(f"Starting LIVE round for job {job.job_id} with Miner {winner_uid}")
+        logger.info(f"{tag} Starting LIVE round with Miner {winner_uid}")
         logger.info(f"=" * 60)
 
         self.round_numbers[job.job_id]["live"] += 1
@@ -442,11 +458,11 @@ class AsyncRoundOrchestrator:
         round_number = round_obj.round_number
         logger.info("=" * 60)
         logger.info(
-            f"Winner for live execution (job {job.job_id}, round #{round_number}): "
+            f"{tag} Winner for live execution (round #{round_number}): "
             f"Miner UID={winner_uid}, hotkey={self.metagraph.hotkeys[winner_uid]}"
         )
         logger.info(
-            f"Starting LIVE round #{round_number} for job {job.job_id} with Miner {winner_uid}"
+            f"{tag} Starting LIVE round #{round_number} with Miner {winner_uid}"
         )
         logger.info("=" * 60)
         liq_manager = SnLiqManagerService(
@@ -480,7 +496,7 @@ class AsyncRoundOrchestrator:
             total_executions = len(execution_results)
             rebalance_history = result.get("rebalance_history", [])
             logger.info(
-                f"Live execution summary (job {job.job_id}, round #{round_number}, "
+                f"{tag} Live execution summary (round #{round_number}, "
                 f"winner Miner {winner_uid}): {len(rebalance_history)} rebalance(s), "
                 f"{total_executions - execution_failures}/{total_executions} on-chain execution(s) succeeded, "
                 f"score={result.get('score', 0):.4f}"
@@ -517,7 +533,7 @@ class AsyncRoundOrchestrator:
                         f"Miner {winner_uid} had {execution_failures}/{total_executions} "
                         f"execution failures in live round {round_number}. Score may be inaccurate."
                     )
-                logger.info(f"Miner {winner_uid} live score: {live_score}")
+                logger.info(f"{tag} Miner {winner_uid} live score: {live_score}")
                 await self.job_repository.update_miner_score(
                     job_id=job.job_id,
                     miner_uid=winner_uid,
@@ -538,7 +554,7 @@ class AsyncRoundOrchestrator:
             )
         else:
             logger.warning(
-                f"Miner {winner_uid} failed/refused live round: {result.get('refusal_reason')}"
+                f"{tag} Miner {winner_uid} failed/refused live round: {result.get('refusal_reason')}"
             )
 
         await self.job_repository.complete_round(
@@ -546,7 +562,7 @@ class AsyncRoundOrchestrator:
             winner_uid=winner_uid if result["accepted"] else None,
             performance_data={"score": result.get("score", 0)},
         )
-        logger.info(f"Completed LIVE round {round_number}")
+        logger.info(f"{tag} Completed LIVE round {round_number}")
 
     async def _run_with_miner_for_live(
         self,

@@ -284,8 +284,12 @@ class JobRepository:
 
         await score.save()
 
-        logger.debug(
-            f"Updated score for miner {miner_uid} on job {job_id}: {float(score.combined_score):.4f}"
+        logger.info(
+            f"[SCORE_UPDATE] miner={miner_uid} job={job_id} "
+            f"eval={float(score.evaluation_score):.6f} live={float(score.live_score):.6f} "
+            f"combined={float(score.combined_score):.6f} "
+            f"total_evals={score.total_evaluations} successful={score.successful_evaluations} "
+            f"refusals={score.refusals}"
         )
         return score
 
