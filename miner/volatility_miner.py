@@ -253,9 +253,12 @@ class SN98Miner:
             self.recent_prices[vault].append(current_tick)
 
         should_rebalance = False
-        if not synapse.current_positions:
+        if not synapse.current_positions or synapse.rebalances_so_far == 0:
             should_rebalance = True
-            logger.info("No current positions. Rebalancing initialized.")
+            logger.info(
+                f"Rebalancing: positions={len(synapse.current_positions or [])}, "
+                f"rebalances_so_far={synapse.rebalances_so_far}"
+            )
         else:
             pos = synapse.current_positions[0]
             tick_width = pos.tick_upper - pos.tick_lower
