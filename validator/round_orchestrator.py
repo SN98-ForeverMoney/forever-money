@@ -242,13 +242,9 @@ class AsyncRoundOrchestrator:
                     self.run_evaluation_round(job),
                     self.run_live_round(job),
                 )
-                logger.info(
-                    f"{tag} Sleeping for {job.round_duration_seconds} s"
-                )
-                await asyncio.sleep(job.round_duration_seconds)
             except Exception as e:
                 logger.error(f"{tag} Error: {e}")
-                await asyncio.sleep(job.round_duration_seconds)
+                await asyncio.sleep(10)
 
     async def run_evaluation_round(self, job: Job):
         """
