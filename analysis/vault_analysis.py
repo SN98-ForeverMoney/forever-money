@@ -51,6 +51,10 @@ POOL_ADDRESS = "0x1024C20c048ea6087293f46D4a1C042CB6705924"
 # NFT Position Manager
 POSITION_MANAGER = "0x827922686190790b37229fd06084350E74485b72"
 
+# Arrakis Pro module (AerodromeStandardModulePrivate) — Collect recipient for all
+# Arrakis positions. Used to discover tx hashes not visible via Blockscout Safe queries.
+ARRAKIS_MODULE = "0x5b1D02aaed93EdE69D6E0dD6Bf44f066Df07BedA"
+
 # Comparison window start (FM vault start)
 START_DATE = datetime(2026, 3, 9, tzinfo=timezone.utc)
 
@@ -354,6 +358,22 @@ def match_events_to_vaults(pool_events: dict, vault_tx_map: dict) -> dict:
     return result
 
 
+def discover_arrakis_tx_hashes(pool_events: dict) -> set:
+    """Discover Arrakis tx hashes via Collect recipient == Arrakis Pro module.
+
+    Arrakis Pro creates positions through its module contract, so Mint txs
+    don't appear in Blockscout for the Safe address. But Collect events have
+    the module as ``recipient``, letting us find all Arrakis txs from cached
+    pool data alone — no extra API calls.
+    """
+    module = ARRAKIS_MODULE.lower()
+    return {
+        evt["tx_hash"].lower()
+        for evt in pool_events.get("Collect", [])
+        if evt.get("args", {}).get("recipient", "").lower() == module
+    }
+
+
 # ---------------------------------------------------------------------------
 # Build position timeline
 # ---------------------------------------------------------------------------
@@ -641,13 +661,20 @@ def compute_metrics(
     deposit_count = cat_counts.get("deposit", 0)
     withdrawal_count = cat_counts.get("withdrawal", 0)
 
-    # Use Mints for range width; fall back to Burns if no Mints (e.g., Arrakis)
+    # Use Mints for range width; fall back to Burns if no Mints
     if not mints.empty:
         avg_range_width = mints["range_width_pct"].mean()
     elif not burns.empty:
         avg_range_width = burns["range_width_pct"].mean()
     else:
         avg_range_width = 0
+
+    # Positions per rebalance (e.g. Arrakis uses 2: wide + narrow)
+    if not mints.empty:
+        mints_per_block = mints.groupby("block").size()
+        positions_per_rebalance = round(mints_per_block.median())
+    else:
+        positions_per_rebalance = 0
 
     # Fees from proper classification
     total_fees_0 = tx_info["claim_fees"][0] + tx_info["rebal_fees"][0]
@@ -672,6 +699,7 @@ def compute_metrics(
         "claim_fees_token1": round(tx_info["claim_fees"][1], 2),
         "total_deposited_0": round(mints["amount0"].sum(), 6) if not mints.empty else 0,
         "total_deposited_1": round(mints["amount1"].sum(), 2) if not mints.empty else 0,
+        "positions_per_rebalance": int(positions_per_rebalance),
     }
 
 
@@ -831,35 +859,59 @@ def build_dashboard(
         mints = tl[tl["event_type"] == "Mint"].copy()
         if mints.empty:
             continue
-        times = [bdt(b) for b in mints["block"]]
-        fig_width.add_trace(go.Scatter(
-            x=times,
-            y=mints["range_width_pct"],
-            mode="lines+markers",
-            name=name,
-            line=dict(color=VAULT_COLORS.get(name, "#999")),
-            marker=dict(size=6),
-        ))
+        color = VAULT_COLORS.get(name, "#999")
+        per_block = mints.groupby("block").agg(
+            wide=("range_width_pct", "max"),
+            narrow=("range_width_pct", "min"),
+            count=("range_width_pct", "size"),
+        ).reset_index()
+        is_multi = (per_block["count"] > 1).any()
+        times = [bdt(b) for b in per_block["block"]]
+
+        if is_multi:
+            fig_width.add_trace(go.Scatter(
+                x=times, y=per_block["wide"],
+                mode="lines+markers",
+                name=f"{name} (wide)",
+                line=dict(color=color), marker=dict(size=5),
+                hovertemplate=f"<b>{name} (wide)</b><br>Width: %{{y:.0f}}%<br>%{{x}}<extra></extra>",
+            ))
+            fig_width.add_trace(go.Scatter(
+                x=times, y=per_block["narrow"],
+                mode="lines+markers",
+                name=f"{name} (narrow)",
+                line=dict(color=color, dash="dash"), marker=dict(size=5),
+                hovertemplate=f"<b>{name} (narrow)</b><br>Width: %{{y:.0f}}%<br>%{{x}}<extra></extra>",
+            ))
+        else:
+            fig_width.add_trace(go.Scatter(
+                x=times, y=per_block["wide"],
+                mode="lines+markers",
+                name=name,
+                line=dict(color=color), marker=dict(size=6),
+                hovertemplate=f"<b>{name}</b><br>Width: %{{y:.0f}}%<br>%{{x}}<extra></extra>",
+            ))
 
     fig_width.update_layout(
         title=dict(text="Range Tightness Over Time", font=dict(size=20)),
         template="plotly_dark",
-        height=350,
+        height=400,
         yaxis_title="Range Width (%)",
-        margin=dict(l=80, r=40, t=80, b=40),
+        margin=dict(l=80, r=40, t=80, b=60),
+        hovermode="closest",
     )
 
     # ===== CHART 3b: Current Position Snapshot =====
     # Get current price from price_df
     current_price_val = price_df["price"].iloc[-1] if not price_df.empty else 0
 
-    # Find active position per vault (last Mint without matching Burn)
+    # Find all active positions per vault
     active_positions = {}
     for name in vault_names:
         segs = vault_segments.get(name, [])
         active = [s for s in segs if not s["closed"]]
         if active:
-            active_positions[name] = active[-1]  # most recent active
+            active_positions[name] = active
 
     snapshot_vaults = [n for n in vault_names if n in active_positions]
     n_snap = len(snapshot_vaults)
@@ -872,32 +924,45 @@ def build_dashboard(
 
     for i, name in enumerate(snapshot_vaults):
         row = i + 1
-        seg = active_positions[name]
+        positions = active_positions[name]
         color = VAULT_COLORS.get(name, "#999")
+        n_pos = len(positions)
 
-        # Draw range as filled rectangle
-        fig_snapshot.add_trace(
-            go.Scatter(
-                x=[seg["price_lower"], seg["price_upper"], seg["price_upper"],
-                   seg["price_lower"], seg["price_lower"]],
-                y=[0, 0, 1, 1, 0],
-                fill="toself",
-                fillcolor=color,
-                opacity=0.6,
-                line=dict(color=color, width=1),
-                showlegend=False,
-                hovertemplate=(
-                    f"<b>{name}</b><br>"
-                    f"Range: {seg['price_lower']:,.0f} – {seg['price_upper']:,.0f} BID/ETH<br>"
-                    f"Width: {seg['range_width_pct']:.1f}%<br>"
-                    "<extra></extra>"
+        for j, seg in enumerate(positions):
+            # Stack bars vertically: each position gets its own y-band
+            y_lo = j / n_pos
+            y_hi = (j + 1) / n_pos - 0.05  # small gap between bars
+            is_wide = n_pos > 1 and seg["range_width_pct"] == max(s["range_width_pct"] for s in positions)
+            label = " (wide)" if is_wide else (" (narrow)" if n_pos > 1 else "")
+            in_range = seg["price_lower"] <= current_price_val <= seg["price_upper"]
+            range_status = "In range" if in_range else "OUT OF RANGE"
+            bar_opacity = 0.6 if (n_pos == 1 or is_wide) else 0.4
+            line_style = dict(color=color, width=1) if in_range else dict(color=color, width=2, dash="dash")
+
+            fig_snapshot.add_trace(
+                go.Scatter(
+                    x=[seg["price_lower"], seg["price_upper"], seg["price_upper"],
+                       seg["price_lower"], seg["price_lower"]],
+                    y=[y_lo, y_lo, y_hi, y_hi, y_lo],
+                    fill="toself",
+                    fillcolor=color if in_range else _hex_to_rgba(color, 0.15),
+                    opacity=bar_opacity,
+                    line=line_style,
+                    showlegend=False,
+                    hovertemplate=(
+                        f"<b>{name}{label}</b><br>"
+                        f"Range: {seg['price_lower']:,.0f} – {seg['price_upper']:,.0f} BID/ETH<br>"
+                        f"Width: {seg['range_width_pct']:.1f}%<br>"
+                        f"{range_status}"
+                        "<extra></extra>"
+                    ),
                 ),
-            ),
-            row=row, col=1,
-        )
+                row=row, col=1,
+            )
 
-        # Add vault name as centered text inside the bar
-        mid_price = (seg["price_lower"] + seg["price_upper"]) / 2
+        # Add vault name as centered text
+        widest = max(positions, key=lambda s: s["range_width_pct"])
+        mid_price = (widest["price_lower"] + widest["price_upper"]) / 2
         fig_snapshot.add_trace(
             go.Scatter(
                 x=[mid_price],
@@ -929,8 +994,8 @@ def build_dashboard(
         fig_snapshot.update_yaxes(visible=False, row=row, col=1)
 
     # Compute x-axis range with padding
-    all_lowers = [active_positions[n]["price_lower"] for n in snapshot_vaults]
-    all_uppers = [active_positions[n]["price_upper"] for n in snapshot_vaults]
+    all_lowers = [s["price_lower"] for n in snapshot_vaults for s in active_positions[n]]
+    all_uppers = [s["price_upper"] for n in snapshot_vaults for s in active_positions[n]]
     x_min = min(all_lowers) * 0.85 if all_lowers else 0
     x_max = max(all_uppers) * 1.15 if all_uppers else 1
 
@@ -956,6 +1021,9 @@ def build_dashboard(
         ],
         ["Range Tightness (avg)"] + [
             f'{m["avg_range_width_pct"]:.1f}%' for m in vault_metrics.values()
+        ],
+        ["Positions / Rebalance"] + [
+            str(m["positions_per_rebalance"]) for m in vault_metrics.values()
         ],
         ["Rebalances"] + [
             str(m["rebalance_count"]) for m in vault_metrics.values()
@@ -1049,7 +1117,7 @@ def build_dashboard(
         if name == "Arcadia 2":
             note = '<br><span style="color:#FFA15A;font-size:11px;">Staked in Aerodrome gauge — earns AERO rewards instead of pool fees</span>'
         elif name == "Arrakis":
-            note = '<br><span style="color:#636EFA;font-size:11px;">Positions created via Arrakis Pro — limited on-chain visibility</span>'
+            note = '<br><span style="color:#636EFA;font-size:11px;">2-position strategy (wide + narrow) · Staked in Aerodrome gauge</span>'
 
         html.append(
             f'<div class="card" style="border-top: 3px solid {color};">'
@@ -1132,7 +1200,7 @@ def build_dashboard(
         <h3>Other Vaults</h3>
         <div style="margin-top: 12px; line-height: 2;">
           <div><b style="color:#FFA15A;">Arcadia 2:</b> Staked in gauge — earns AERO rewards (different token). Pool fee data not comparable.</div>
-          <div><b style="color:#636EFA;">Arrakis:</b> Limited visibility — positions created via Arrakis Pro contracts.</div>
+          <div><b style="color:#636EFA;">Arrakis:</b> Staked in gauge — earns AERO rewards (different token). Pool fee data not comparable.</div>
           <div><b style="color:#00CC96;">ForeverMoney:</b> Active only 17 days with minimal test capital (~0.0003 WETH). Too early for meaningful IL comparison.</div>
         </div>
       </div>
@@ -1203,7 +1271,7 @@ def build_dashboard(
     <table style="border-collapse:collapse; margin:8px 0;">
       <tr style="border-bottom:1px solid #333;">
         <td style="padding:6px 16px 6px 0;"><b>Arrakis</b></td>
-        <td style="padding:6px 0;">Positions created via Arrakis Pro contracts — Mint events can't be traced to the Safe address. Only Burns/Collects (exit) are visible.</td>
+        <td style="padding:6px 0;">Positions traced via Arrakis Pro module (Collect recipient). Initial deposit positions (before Dec 2025 data window) not captured; all rebalances tracked.</td>
       </tr>
       <tr style="border-bottom:1px solid #333;">
         <td style="padding:6px 16px 6px 0;"><b>Arcadia 2</b></td>
@@ -1242,6 +1310,14 @@ def main():
         pool_events = cached["events"]
         vault_tx_map = {name: set(txs) for name, txs in cached["vault_tx_hashes"].items()}
         print("Using cached data.")
+
+        # Arrakis Pro module discovery (works on cached data, no API calls)
+        arrakis_module_txs = discover_arrakis_tx_hashes(pool_events)
+        old_count = len(vault_tx_map.get("Arrakis", set()))
+        vault_tx_map["Arrakis"] = vault_tx_map.get("Arrakis", set()) | arrakis_module_txs
+        new_found = len(vault_tx_map["Arrakis"]) - old_count
+        if new_found:
+            print(f"  Arrakis Pro module discovery: {new_found} additional txs")
     else:
         # Step 1: Get vault tx hashes from Blockscout
         print("\nFetching vault transaction hashes from Blockscout...")
@@ -1338,6 +1414,13 @@ def main():
             for evt in decoded
         ]
 
+        # Arrakis Pro module discovery
+        arrakis_module_txs = discover_arrakis_tx_hashes(pool_events)
+        new_found = len(arrakis_module_txs - vault_tx_map.get("Arrakis", set()))
+        vault_tx_map["Arrakis"] = vault_tx_map.get("Arrakis", set()) | arrakis_module_txs
+        if new_found:
+            print(f"  Arrakis Pro module discovery: {new_found} additional txs")
+
         # Cache
         save_cache(pool_events, vault_tx_map)
 
@@ -1398,6 +1481,7 @@ def main():
         ("Deposits", lambda m: str(m["deposit_count"])),
         ("Withdrawals", lambda m: str(m["withdrawal_count"])),
         ("Avg Range Width", lambda m: f'{m["avg_range_width_pct"]:.1f}%'),
+        ("Positions/Rebalance", lambda m: str(m["positions_per_rebalance"])),
         ("Uses Swaps", lambda m: "Yes" if m["uses_swaps"] else "No"),
         ("Total Fees (WETH)", lambda m: f'{m["total_fees_token0"]:.6f}'),
         ("Total Fees (BID)", lambda m: f'{m["total_fees_token1"]:.0f}'),
