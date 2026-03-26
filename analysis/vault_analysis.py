@@ -1097,8 +1097,7 @@ def build_dashboard(
         "</style>",
         "</head><body>",
         "<h1>ALM Vault Analysis</h1>",
-        f'<div class="subtitle">WETH / BID on Base (Aerodrome CL) &mdash; {START_DATE.strftime("%b %d, %Y")} to present</div>',
-        f'<div style="text-align:center;color:#666;font-size:12px;margin-top:4px;">Data snapshot: {cached_at}</div>',
+        f'<div class="subtitle">WETH / BID on Base (Aerodrome CL) &mdash; {POSITIONS_START_DATE.strftime("%b %d, %Y")} to {cached_at}</div>',
 
         # --- Behavior cards ---
         '<h2>Vault Behavior at a Glance</h2>',
