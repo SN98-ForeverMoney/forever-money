@@ -80,5 +80,6 @@ docs/_build/
 site/
 
 
-# vaults analysis cached data
+# vaults analysis
 analysis/data/*
+analysis/output/*
