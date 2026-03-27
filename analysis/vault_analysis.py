@@ -7,7 +7,7 @@ Usage:
     python analysis/vault_analysis.py
 
 Output:
-    analysis/output/dashboard.html
+    analysis/output/vaults_dashboard.html
 """
 
 import json
@@ -292,7 +292,7 @@ def events_to_serializable(raw_events: dict) -> dict:
 
 def save_cache(pool_events: dict, vault_tx_map: dict):
     """Save pool events and vault tx hashes to cache."""
-    cache_file = CACHE_DIR / "pool_events.json"
+    cache_file = CACHE_DIR / "vaults_pool_events.json"
     data = {
         "pool": POOL_ADDRESS,
         "events": pool_events,
@@ -306,7 +306,7 @@ def save_cache(pool_events: dict, vault_tx_map: dict):
 
 
 def load_cache() -> dict | None:
-    cache_file = CACHE_DIR / "pool_events.json"
+    cache_file = CACHE_DIR / "vaults_pool_events.json"
     if not cache_file.exists():
         return None
     with open(cache_file) as f:
@@ -1296,7 +1296,7 @@ def build_dashboard(
 
     html.append("</body></html>")
 
-    output_path = OUTPUT_DIR / "dashboard.html"
+    output_path = OUTPUT_DIR / "vaults_dashboard.html"
     with open(output_path, "w") as f:
         f.write("\n".join(html))
     print(f"\nDashboard saved to: {output_path}")
