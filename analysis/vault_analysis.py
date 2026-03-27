@@ -43,6 +43,7 @@ VAULTS = {
     "Arcadia 1": "0xeb202299f8b1aBcEA945Ec19aF72381057f4B453",
     "Arcadia 2": "0xAF3DC9Ff470B162800E8E6C4aDF7ad06f8438EEd",
     "ForeverMoney": "0x215968271599156a3298CF4BCb16517F687F013b",
+    "vfat": "0xBCd06b460e9ec8B202984cdCf14CB8f0FD263e24",
 }
 
 # Pool address: WETH/BID Aerodrome CL on Base
@@ -681,7 +682,7 @@ def compute_metrics(
     total_fees_1 = tx_info["claim_fees"][1] + tx_info["rebal_fees"][1]
 
     # Determine if vault uses swaps
-    uses_swaps = "Arcadia" in vault_name
+    uses_swaps = "Arcadia" in vault_name or vault_name == "vfat"
 
     return {
         "rebalance_count": rebalance_count,
@@ -719,6 +720,7 @@ VAULT_COLORS = {
     "Arcadia 1": "#EF553B",
     "Arcadia 2": "#FFA15A",
     "ForeverMoney": "#00CC96",
+    "vfat": "#AB63FA",
 }
 
 
@@ -1117,6 +1119,8 @@ def build_dashboard(
             note = '<br><span style="color:#FFA15A;font-size:11px;">Staked in Aerodrome gauge — earns AERO rewards instead of pool fees</span>'
         elif name == "Arrakis":
             note = '<br><span style="color:#636EFA;font-size:11px;">2-position strategy (wide + narrow) · Staked in Aerodrome gauge</span>'
+        elif name == "vfat":
+            note = '<br><span style="color:#AB63FA;font-size:11px;">Per-user Sickle smart account · Uses swaps on deposit</span>'
 
         html.append(
             f'<div class="card" style="border-top: 3px solid {color};">'
@@ -1201,6 +1205,7 @@ def build_dashboard(
           <div><b style="color:#FFA15A;">Arcadia 2:</b> Staked in gauge — earns AERO rewards (different token). Pool fee data not comparable.</div>
           <div><b style="color:#636EFA;">Arrakis:</b> Staked in gauge — earns AERO rewards (different token). Pool fee data not comparable.</div>
           <div><b style="color:#00CC96;">ForeverMoney:</b> Active only 17 days with minimal test capital (~0.0003 WETH). Too early for meaningful IL comparison.</div>
+          <div><b style="color:#AB63FA;">vfat:</b> Single deposit via Sickle smart account. No rebalances yet — too early for IL comparison.</div>
         </div>
       </div>
     </div>
@@ -1218,7 +1223,7 @@ def build_dashboard(
     <h3 style="color:#eee; font-size:16px; margin-top:24px;">Data Source</h3>
     <p>All data comes directly from on-chain events on the <b>WETH/BID Aerodrome CL pool</b> on Base
     (<code style="color:#888;">0x1024C20c...05924</code>). Events were fetched via RPC <code>eth_getLogs</code>
-    from Nov 30, 2025 to present. Each vault's transactions were identified via the
+    from Nov 30, 2025 to """ + cached_at + """. Each vault's transactions were identified via the
     <a href="https://base.blockscout.com" style="color:#636EFA;">Blockscout API</a> and matched to pool events by transaction hash.</p>
 
     <h3 style="color:#eee; font-size:16px; margin-top:24px;">Range Data</h3>
@@ -1276,9 +1281,13 @@ def build_dashboard(
         <td style="padding:6px 16px 6px 0;"><b>Arcadia 2</b></td>
         <td style="padding:6px 0;">Stakes LP positions in Aerodrome gauge — earns AERO token rewards instead of pool trading fees. The 0 fee number doesn't mean 0 income.</td>
       </tr>
-      <tr>
+      <tr style="border-bottom:1px solid #333;">
         <td style="padding:6px 16px 6px 0;"><b>ForeverMoney</b></td>
         <td style="padding:6px 0;">Operating with minimal test capital (~0.0003 WETH per position) for ~17 days. Fee and IL numbers are too small for meaningful comparison.</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 16px 6px 0;"><b>vfat</b></td>
+        <td style="padding:6px 0;">Single deposit via Sickle smart account, no rebalances yet. Too early for meaningful performance comparison.</td>
       </tr>
     </table>
 
