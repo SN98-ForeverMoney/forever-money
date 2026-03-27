@@ -10,18 +10,13 @@ Output:
     analysis/output/vaults_dashboard.html
 """
 
-import json
-import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
 from web3 import Web3
 
 # ---------------------------------------------------------------------------
@@ -31,12 +26,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from validator.utils.math import UniswapV3Math  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-BASE_RPC = os.environ.get("BASE_RPC", "https://base-mainnet.public.blastapi.io")
-w3 = Web3(Web3.HTTPProvider(BASE_RPC, request_kwargs={"timeout": 30}))
+from analysis.common import (  # noqa: E402
+    CACHE_DIR, OUTPUT_DIR,
+    w3, POOL_ABI,
+    get_block_timestamp,
+    get_vault_tx_hashes,
+    fetch_logs_chunked,
+    _serialize,
+    build_block_timestamps,
+    build_range_segments,
+    save_cache as _save_cache,
+    load_cache as _load_cache,
+    classify_transactions as _classify_transactions,
+    build_position_timeline as _build_position_timeline,
+    build_price_timeline as _build_price_timeline,
+)
 
 VAULTS = {
     "Arrakis": "0x203a29615F8E83d8eFbfA839f486Be0fa17a75b5",
@@ -62,41 +66,13 @@ START_DATE = datetime(2026, 3, 9, tzinfo=timezone.utc)
 # Extended window: capture position openings from all vaults (Arrakis/Arcadia active since Dec 2025)
 POSITIONS_START_DATE = datetime(2025, 11, 30, tzinfo=timezone.utc)
 
-# Paths
-ANALYSIS_DIR = Path(__file__).resolve().parent
-CACHE_DIR = ANALYSIS_DIR / "data"
-OUTPUT_DIR = ANALYSIS_DIR / "output"
-CACHE_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-ABI_DIR = PROJECT_ROOT / "validator" / "utils" / "abis"
-
 # Token decimals (WETH=18, BID=18)
 DECIMALS_TOKEN0 = 18
 DECIMALS_TOKEN1 = 18
 
-BLOCKSCOUT_BASE = "https://base.blockscout.com/api/v2"
-
-# ---------------------------------------------------------------------------
-# ABI loading
-# ---------------------------------------------------------------------------
-
-def load_abi(name: str) -> list:
-    with open(ABI_DIR / f"{name}.json") as f:
-        data = json.load(f)
-    return data["abi"] if isinstance(data, dict) and "abi" in data else data
-
-
-POOL_ABI = load_abi("ICLPool")
-
 # ---------------------------------------------------------------------------
 # Block helpers
 # ---------------------------------------------------------------------------
-
-def get_block_timestamp(block_num: int) -> int:
-    block = w3.eth.get_block(block_num)
-    return block["timestamp"]
-
 
 def find_block_for_timestamp(target_ts: int, lo: int = 1, hi: int | None = None) -> int:
     """Binary search for the block closest to a target timestamp."""
@@ -113,112 +89,8 @@ def find_block_for_timestamp(target_ts: int, lo: int = 1, hi: int | None = None)
 
 
 # ---------------------------------------------------------------------------
-# Blockscout: get tx hashes per vault
-# ---------------------------------------------------------------------------
-
-def _fetch_blockscout_paginated(url: str, tx_hash_key: str = "transaction_hash") -> set[str]:
-    """Fetch paginated results from Blockscout, extracting tx hashes."""
-    tx_hashes = set()
-    page = 0
-    while url and page < 50:
-        for attempt in range(3):
-            try:
-                resp = requests.get(url, timeout=15)
-                resp.raise_for_status()
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(1)
-                else:
-                    print(f"    Failed after 3 attempts: {e}")
-                    return tx_hashes
-
-        data = resp.json()
-        items = data.get("items", [])
-        for item in items:
-            tx = item.get(tx_hash_key, "") or item.get("hash", "")
-            if tx:
-                tx_hashes.add(tx.lower())
-
-        next_params = data.get("next_page_params")
-        if next_params and items:
-            base_url = url.split("?")[0]
-            params = "&".join(f"{k}={v}" for k, v in next_params.items())
-            url = f"{base_url}?{params}"
-            page += 1
-        else:
-            url = None
-    return tx_hashes
-
-
-def get_vault_tx_hashes(vault_address: str) -> set[str]:
-    """
-    Get all unique transaction hashes involving a vault address via
-    BOTH Blockscout token-transfers AND transactions endpoints.
-    Token-transfers captures Burns/Collects (tokens flow to vault).
-    Transactions captures Mints (vault initiates the tx).
-    """
-    addr = vault_address.lower()
-    tx_hashes = set()
-
-    # Token transfers (captures most events)
-    tx_hashes |= _fetch_blockscout_paginated(
-        f"{BLOCKSCOUT_BASE}/addresses/{addr}/token-transfers",
-        tx_hash_key="transaction_hash",
-    )
-
-    # Direct transactions (captures Mint txs where vault is sender/caller)
-    tx_hashes |= _fetch_blockscout_paginated(
-        f"{BLOCKSCOUT_BASE}/addresses/{addr}/transactions",
-        tx_hash_key="hash",
-    )
-
-    return tx_hashes
-
-
-# ---------------------------------------------------------------------------
 # Event fetching from RPC
 # ---------------------------------------------------------------------------
-
-def fetch_logs_chunked(
-    pool_address: str,
-    topics: list,
-    from_block: int,
-    to_block: int,
-    chunk_size: int = 10_000,
-) -> list:
-    """Fetch eth_getLogs in chunks with retry logic."""
-    all_logs = []
-    current = from_block
-    total_chunks = (to_block - from_block) // chunk_size + 1
-    chunk_idx = 0
-
-    while current <= to_block:
-        end = min(current + chunk_size - 1, to_block)
-        chunk_idx += 1
-        for attempt in range(5):
-            try:
-                logs = w3.eth.get_logs({
-                    "address": Web3.to_checksum_address(pool_address),
-                    "topics": topics,
-                    "fromBlock": current,
-                    "toBlock": end,
-                })
-                all_logs.extend(logs)
-                break
-            except Exception as e:
-                if attempt < 4:
-                    wait = 2 ** attempt
-                    print(f"    Retry {attempt+1} (chunk {chunk_idx}/{total_chunks}): {e}")
-                    time.sleep(wait)
-                else:
-                    print(f"    FAILED chunk {current}-{end}: {e}")
-        if chunk_idx % 20 == 0:
-            print(f"    Progress: {chunk_idx}/{total_chunks} chunks, {len(all_logs)} logs so far")
-        current = end + 1
-
-    return all_logs
-
 
 def fetch_all_pool_events(pool_address: str, from_block: int, to_block: int) -> dict:
     """Fetch Mint, Burn, Collect, Swap events from a pool."""
@@ -260,14 +132,6 @@ def fetch_all_pool_events(pool_address: str, from_block: int, to_block: int) -> 
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
-def _serialize(v: Any) -> Any:
-    if isinstance(v, bytes):
-        return "0x" + v.hex()
-    if isinstance(v, int) and abs(v) > 2**53:
-        return str(v)
-    return v
-
-
 def events_to_serializable(raw_events: dict) -> dict:
     """Convert web3 event objects to JSON-serializable dicts."""
     events = {}
@@ -290,30 +154,22 @@ def events_to_serializable(raw_events: dict) -> dict:
 # Cache
 # ---------------------------------------------------------------------------
 
+VAULT_CACHE_FILE = CACHE_DIR / "vaults_pool_events.json"
+
+
 def save_cache(pool_events: dict, vault_tx_map: dict):
     """Save pool events and vault tx hashes to cache."""
-    cache_file = CACHE_DIR / "vaults_pool_events.json"
     data = {
         "pool": POOL_ADDRESS,
         "events": pool_events,
         "vault_tx_hashes": {name: sorted(txs) for name, txs in vault_tx_map.items()},
         "cached_at": datetime.now(tz=timezone.utc).isoformat(),
     }
-    with open(cache_file, "w") as f:
-        json.dump(data, f, indent=2)
-    total = sum(len(v) for v in pool_events.values())
-    print(f"Cached {total} events + vault tx hashes to {cache_file}")
+    _save_cache(VAULT_CACHE_FILE, data)
 
 
 def load_cache() -> dict | None:
-    cache_file = CACHE_DIR / "vaults_pool_events.json"
-    if not cache_file.exists():
-        return None
-    with open(cache_file) as f:
-        data = json.load(f)
-    total = sum(len(v) for v in data.get("events", {}).values())
-    print(f"Loaded cache: {total} events, cached at {data.get('cached_at', '?')}")
-    return data
+    return _load_cache(VAULT_CACHE_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -385,49 +241,22 @@ def tick_to_price(tick: int) -> float:
     return UniswapV3Math.sqrt_price_x96_to_price(sqrt, DECIMALS_TOKEN0, DECIMALS_TOKEN1)
 
 
+def _vault_price_fn(tick_lower: int, tick_upper: int) -> tuple[float, float]:
+    """Price callback for WETH/BID — direct price, natural order."""
+    return tick_to_price(tick_lower), tick_to_price(tick_upper)
+
+
+def _vault_sqrt_price_fn(sqrt_price_x96: int) -> float:
+    """sqrtPriceX96 → BID/WETH price (direct)."""
+    return UniswapV3Math.sqrt_price_x96_to_price(
+        sqrt_price_x96, DECIMALS_TOKEN0, DECIMALS_TOKEN1
+    )
+
+
 def build_position_timeline(vault_events: dict) -> pd.DataFrame:
-    """Build a timeline of Mint/Burn events for a vault."""
-    rows = []
-    for event_type in ["Mint", "Burn"]:
-        for evt in vault_events.get(event_type, []):
-            args = evt.get("args", {})
-            tick_lower = int(args.get("tickLower", 0))
-            tick_upper = int(args.get("tickUpper", 0))
-            amount0 = int(args.get("amount0", 0))
-            amount1 = int(args.get("amount1", 0))
-            liquidity = int(args.get("amount", 0))
-
-            # Skip zero-liquidity burns (fee accounting only, not real position changes)
-            if event_type == "Burn" and liquidity == 0:
-                continue
-
-            # Skip full-range positions (MIN_TICK to MAX_TICK) — these produce
-            # extreme prices and are typically cleanup/initialization events
-            if abs(tick_lower) > 500000 or abs(tick_upper) > 500000:
-                continue
-
-            price_lower = tick_to_price(tick_lower)
-            price_upper = tick_to_price(tick_upper)
-
-            rows.append({
-                "block": evt.get("block", 0),
-                "tx_hash": evt.get("tx_hash", ""),
-                "event_type": event_type,
-                "tick_lower": tick_lower,
-                "tick_upper": tick_upper,
-                "price_lower": price_lower,
-                "price_upper": price_upper,
-                "range_width_pct": ((price_upper - price_lower) / price_lower * 100)
-                                   if price_lower > 0 else 0,
-                "amount0": amount0 / 10**DECIMALS_TOKEN0,
-                "amount1": amount1 / 10**DECIMALS_TOKEN1,
-                "liquidity": liquidity,
-            })
-
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values("block").reset_index(drop=True)
-    return df
+    return _build_position_timeline(
+        vault_events, DECIMALS_TOKEN0, DECIMALS_TOKEN1, _vault_price_fn
+    )
 
 
 def build_fee_timeline(vault_events: dict) -> pd.DataFrame:
@@ -446,139 +275,8 @@ def build_fee_timeline(vault_events: dict) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# Build range segments for visualization
-# ---------------------------------------------------------------------------
-
-def build_range_segments(timeline: pd.DataFrame, earliest_block: int = 0) -> list[dict]:
-    """
-    From Mint/Burn timeline, build range segments with start/end blocks.
-    Each segment = a position that was active from Mint to Burn (or still active).
-    Burns without matching Mints are shown as "inferred" (position existed before our data).
-    """
-    # Track active positions: {(tick_lower, tick_upper): [{start_block, liquidity}]}
-    active: dict[tuple, list] = {}
-    segments = []
-
-    for _, row in timeline.iterrows():
-        key = (row["tick_lower"], row["tick_upper"])
-
-        if row["event_type"] == "Mint":
-            if key not in active:
-                active[key] = []
-            active[key].append({
-                "start_block": row["block"],
-                "liquidity": row["liquidity"],
-                "price_lower": row["price_lower"],
-                "price_upper": row["price_upper"],
-                "range_width_pct": row["range_width_pct"],
-            })
-
-        elif row["event_type"] == "Burn":
-            if key in active and active[key]:
-                # Close the oldest matching position
-                pos = active[key].pop(0)
-                segments.append({
-                    "start_block": pos["start_block"],
-                    "end_block": row["block"],
-                    "tick_lower": key[0],
-                    "tick_upper": key[1],
-                    "price_lower": pos["price_lower"],
-                    "price_upper": pos["price_upper"],
-                    "range_width_pct": pos["range_width_pct"],
-                    "liquidity": pos["liquidity"],
-                    "closed": True,
-                })
-                if not active[key]:
-                    del active[key]
-            # Burn without matching Mint — skip (position was created
-            # before our data window or through untracked contracts)
-
-    # Still-active positions
-    for key, positions in active.items():
-        for pos in positions:
-            segments.append({
-                "start_block": pos["start_block"],
-                "end_block": None,  # still active
-                "tick_lower": key[0],
-                "tick_upper": key[1],
-                "price_lower": pos["price_lower"],
-                "price_upper": pos["price_upper"],
-                "range_width_pct": pos["range_width_pct"],
-                "liquidity": pos["liquidity"],
-                "closed": False,
-            })
-
-    return segments
-
-
-# ---------------------------------------------------------------------------
-# Price timeline from Swap events
-# ---------------------------------------------------------------------------
-
 def build_price_timeline(swap_events: list) -> pd.DataFrame:
-    rows = []
-    for evt in swap_events:
-        args = evt.get("args", {})
-        sqrt_price = int(args.get("sqrtPriceX96", 0))
-        if sqrt_price > 0:
-            price = UniswapV3Math.sqrt_price_x96_to_price(
-                sqrt_price, DECIMALS_TOKEN0, DECIMALS_TOKEN1
-            )
-            rows.append({
-                "block": evt.get("block", 0),
-                "price": price,
-                "tick": int(args.get("tick", 0)),
-            })
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values("block").reset_index(drop=True)
-    return df
-
-
-# ---------------------------------------------------------------------------
-# Block → timestamp mapping
-# ---------------------------------------------------------------------------
-
-def build_block_timestamps(blocks: list[int]) -> dict[int, datetime]:
-    """Build a mapping from block numbers to datetimes (sampled + interpolated)."""
-    unique = sorted(set(blocks))
-    if not unique:
-        return {}
-
-    # Sample ~60 blocks for timestamp lookups
-    if len(unique) > 60:
-        step = max(1, len(unique) // 60)
-        sample = unique[::step]
-        if unique[-1] not in sample:
-            sample.append(unique[-1])
-        if unique[0] not in sample:
-            sample.insert(0, unique[0])
-    else:
-        sample = unique
-
-    print(f"  Fetching timestamps for {len(sample)} sampled blocks...")
-    block_ts = {}
-    for b in sample:
-        try:
-            block_ts[b] = get_block_timestamp(b)
-        except Exception:
-            pass
-
-    # Interpolate
-    if len(block_ts) >= 2:
-        sorted_known = sorted(block_ts.items())
-        for b in unique:
-            if b not in block_ts:
-                for i in range(len(sorted_known) - 1):
-                    b0, t0 = sorted_known[i]
-                    b1, t1 = sorted_known[i + 1]
-                    if b0 <= b <= b1:
-                        frac = (b - b0) / (b1 - b0) if b1 != b0 else 0
-                        block_ts[b] = int(t0 + frac * (t1 - t0))
-                        break
-
-    return {b: datetime.fromtimestamp(ts, tz=timezone.utc) for b, ts in block_ts.items()}
+    return _build_price_timeline(swap_events, _vault_sqrt_price_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -586,64 +284,13 @@ def build_block_timestamps(blocks: list[int]) -> dict[int, datetime]:
 # ---------------------------------------------------------------------------
 
 def classify_transactions(vault_events: dict) -> dict:
-    """
-    Classify vault transactions into types based on pool events in each tx.
-    - rebalance: has real Burns (liquidity > 0) AND Mints
-    - claim: has zero-liquidity Burns + Collects (fee collection only)
-    - deposit: has Mints but no real Burns
-    - withdrawal: has real Burns but no Mints
-    Returns {tx_hash: category} and fee totals.
-    """
-    from collections import defaultdict
-    tx_ev = defaultdict(lambda: {"Mint": [], "Burn": [], "Collect": []})
-    for etype in ["Mint", "Burn", "Collect"]:
-        for e in vault_events.get(etype, []):
-            tx = e.get("tx_hash", "").lower()
-            if tx:
-                tx_ev[tx][etype].append(e)
-
-    categories = {}
-    claim_fees = [0.0, 0.0]
-    rebal_fees = [0.0, 0.0]
-
-    for tx, ev in tx_ev.items():
-        has_mint = len(ev["Mint"]) > 0
-        has_burn = len(ev["Burn"]) > 0
-        has_collect = len(ev["Collect"]) > 0
-        all_burns_zero = has_burn and all(
-            int(b["args"]["amount"]) == 0 for b in ev["Burn"]
-        )
-        real_burn = has_burn and not all_burns_zero
-
-        if real_burn and has_mint:
-            categories[tx] = "rebalance"
-            # Fees from rebalance = Collect - Burn
-            for c in ev["Collect"]:
-                rebal_fees[0] += int(c["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                rebal_fees[1] += int(c["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-            for b in ev["Burn"]:
-                rebal_fees[0] -= int(b["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                rebal_fees[1] -= int(b["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-        elif (all_burns_zero or not has_burn) and has_collect and not has_mint:
-            categories[tx] = "claim"
-            for c in ev["Collect"]:
-                claim_fees[0] += int(c["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                claim_fees[1] += int(c["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-        elif has_mint and not real_burn:
-            categories[tx] = "deposit"
-        elif real_burn and not has_mint:
-            categories[tx] = "withdrawal"
-
-    return {
-        "categories": categories,
-        "claim_fees": claim_fees,
-        "rebal_fees": [max(0, f) for f in rebal_fees],
-    }
+    return _classify_transactions(
+        vault_events, DECIMALS_TOKEN0, DECIMALS_TOKEN1, include_withdrawal_fees=False
+    )
 
 
 def compute_metrics(
     timeline: pd.DataFrame,
-    fees_df: pd.DataFrame,
     swaps: list,
     vault_name: str = "",
     vault_events: dict | None = None,
@@ -682,7 +329,7 @@ def compute_metrics(
     total_fees_1 = tx_info["claim_fees"][1] + tx_info["rebal_fees"][1]
 
     # Determine if vault uses swaps
-    uses_swaps = "Arcadia" in vault_name or vault_name == "vfat"
+    uses_swaps = vault_name in ("Arcadia 1", "Arcadia 2", "vfat")
 
     return {
         "rebalance_count": rebalance_count,
@@ -726,7 +373,6 @@ VAULT_COLORS = {
 
 def build_dashboard(
     vault_timelines: dict[str, pd.DataFrame],
-    vault_fees: dict[str, pd.DataFrame],
     vault_metrics: dict[str, dict],
     vault_segments: dict[str, list[dict]],
     price_df: pd.DataFrame,
@@ -1445,12 +1091,7 @@ def main():
     for name in VAULTS:
         vault_timelines[name] = build_position_timeline(vault_events[name])
         vault_fees[name] = build_fee_timeline(vault_events[name])
-        # Use positions start block as earliest reference for inferred segments
-        positions_from = int(POSITIONS_START_DATE.timestamp())
-        vault_segments[name] = build_range_segments(
-            vault_timelines[name],
-            earliest_block=38835727,  # ~Nov 30, 2025
-        )
+        vault_segments[name] = build_range_segments(vault_timelines[name])
         tl = vault_timelines[name]
         if not tl.empty:
             mints = len(tl[tl["event_type"] == "Mint"])
@@ -1470,7 +1111,7 @@ def main():
     vault_metrics = {}
     for name in VAULTS:
         vault_metrics[name] = compute_metrics(
-            vault_timelines[name], vault_fees[name], vault_events[name]["Swap"],
+            vault_timelines[name], vault_events[name]["Swap"],
             vault_name=name,
             vault_events=vault_events[name],
         )
@@ -1527,7 +1168,7 @@ def main():
         snapshot_str = datetime.now(tz=timezone.utc).strftime("%b %d, %Y at %H:%M UTC")
 
     path = build_dashboard(
-        vault_timelines, vault_fees, vault_metrics,
+        vault_timelines, vault_metrics,
         vault_segments, price_df, block_ts,
         cached_at=snapshot_str,
     )

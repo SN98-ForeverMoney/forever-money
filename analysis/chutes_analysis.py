@@ -9,18 +9,12 @@ Output:
     analysis/output/chutes_dashboard.html
 """
 
-import json
-import os
 import sys
-import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import requests
 from web3 import Web3
 
@@ -31,12 +25,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from validator.utils.math import UniswapV3Math  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-BASE_RPC = os.environ.get("BASE_RPC", "https://base-mainnet.public.blastapi.io")
-w3 = Web3(Web3.HTTPProvider(BASE_RPC, request_kwargs={"timeout": 30}))
+from analysis.common import (  # noqa: E402
+    CACHE_DIR, OUTPUT_DIR,
+    w3, POOL_ABI, ERC20_ABI,
+    get_vault_tx_hashes,
+    fetch_logs_chunked,
+    _serialize,
+    build_block_timestamps,
+    build_range_segments,
+    save_cache as _save_cache,
+    load_cache as _load_cache,
+    classify_transactions as _classify_transactions,
+    build_position_timeline as _build_position_timeline,
+    build_price_timeline as _build_price_timeline,
+)
 
 # Pool: xSN64/USDC Aerodrome CL (Slipstream) on Base
 POOL_ADDRESS = "0x72764A83B78074e517fd1E2da8C4c289020C6498"
@@ -57,157 +59,13 @@ TOKEN1_SYMBOL = "xSN64"
 # Block range — start before first known activity (Vault 1 Mint at 43825338)
 START_BLOCK = 43700000
 
-# Paths
-ANALYSIS_DIR = Path(__file__).resolve().parent
-CACHE_DIR = ANALYSIS_DIR / "data"
-OUTPUT_DIR = ANALYSIS_DIR / "output"
-CACHE_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-ABI_DIR = PROJECT_ROOT / "validator" / "utils" / "abis"
-
-BLOCKSCOUT_BASE = "https://base.blockscout.com/api/v2"
-
 # Vault color
 VAULT_COLOR = "#00CC96"
 POOL_COLOR = "#636EFA"
 
 # ---------------------------------------------------------------------------
-# ABI loading
-# ---------------------------------------------------------------------------
-
-def load_abi(name: str) -> list:
-    with open(ABI_DIR / f"{name}.json") as f:
-        data = json.load(f)
-    return data["abi"] if isinstance(data, dict) and "abi" in data else data
-
-
-POOL_ABI = load_abi("ICLPool")
-
-# Minimal ABI for pool state queries (may not be in ICLPool.json)
-POOL_STATE_ABI = [
-    {"inputs": [], "name": "fee", "outputs": [{"type": "uint24"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [], "name": "slot0", "outputs": [
-        {"name": "sqrtPriceX96", "type": "uint160"},
-        {"name": "tick", "type": "int24"},
-        {"name": "observationIndex", "type": "uint16"},
-        {"name": "observationCardinality", "type": "uint16"},
-        {"name": "observationCardinalityNext", "type": "uint16"},
-        {"name": "unlocked", "type": "bool"},
-    ], "stateMutability": "view", "type": "function"},
-    {"inputs": [], "name": "liquidity", "outputs": [{"type": "uint128"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [], "name": "tickSpacing", "outputs": [{"type": "int24"}], "stateMutability": "view", "type": "function"},
-]
-
-ERC20_ABI = [
-    {"inputs": [{"name": "account", "type": "address"}], "name": "balanceOf",
-     "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
-]
-
-
-# ---------------------------------------------------------------------------
-# Block helpers
-# ---------------------------------------------------------------------------
-
-def get_block_timestamp(block_num: int) -> int:
-    block = w3.eth.get_block(block_num)
-    return block["timestamp"]
-
-
-# ---------------------------------------------------------------------------
-# Blockscout: get tx hashes
-# ---------------------------------------------------------------------------
-
-def _fetch_blockscout_paginated(url: str, tx_hash_key: str = "transaction_hash") -> set[str]:
-    tx_hashes = set()
-    page = 0
-    while url and page < 50:
-        for attempt in range(3):
-            try:
-                resp = requests.get(url, timeout=15)
-                resp.raise_for_status()
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(1)
-                else:
-                    print(f"    Failed after 3 attempts: {e}")
-                    return tx_hashes
-
-        data = resp.json()
-        items = data.get("items", [])
-        for item in items:
-            tx = item.get(tx_hash_key, "") or item.get("hash", "")
-            if tx:
-                tx_hashes.add(tx.lower())
-
-        next_params = data.get("next_page_params")
-        if next_params and items:
-            base_url = url.split("?")[0]
-            params = "&".join(f"{k}={v}" for k, v in next_params.items())
-            url = f"{base_url}?{params}"
-            page += 1
-        else:
-            url = None
-    return tx_hashes
-
-
-def get_vault_tx_hashes(vault_address: str) -> set[str]:
-    addr = vault_address.lower()
-    tx_hashes = set()
-    tx_hashes |= _fetch_blockscout_paginated(
-        f"{BLOCKSCOUT_BASE}/addresses/{addr}/token-transfers",
-        tx_hash_key="transaction_hash",
-    )
-    tx_hashes |= _fetch_blockscout_paginated(
-        f"{BLOCKSCOUT_BASE}/addresses/{addr}/transactions",
-        tx_hash_key="hash",
-    )
-    return tx_hashes
-
-
-# ---------------------------------------------------------------------------
 # RPC event fetching
 # ---------------------------------------------------------------------------
-
-def fetch_logs_chunked(
-    pool_address: str,
-    topics: list,
-    from_block: int,
-    to_block: int,
-    chunk_size: int = 10_000,
-) -> list:
-    all_logs = []
-    current = from_block
-    total_chunks = (to_block - from_block) // chunk_size + 1
-    chunk_idx = 0
-
-    while current <= to_block:
-        end = min(current + chunk_size - 1, to_block)
-        chunk_idx += 1
-        for attempt in range(5):
-            try:
-                logs = w3.eth.get_logs({
-                    "address": Web3.to_checksum_address(pool_address),
-                    "topics": topics,
-                    "fromBlock": current,
-                    "toBlock": end,
-                })
-                all_logs.extend(logs)
-                break
-            except Exception as e:
-                if attempt < 4:
-                    wait = 2 ** attempt
-                    print(f"    Retry {attempt+1} (chunk {chunk_idx}/{total_chunks}): {e}")
-                    time.sleep(wait)
-                else:
-                    print(f"    FAILED chunk {current}-{end}: {e}")
-        if chunk_idx % 20 == 0:
-            print(f"    Progress: {chunk_idx}/{total_chunks} chunks, {len(all_logs)} logs so far")
-        current = end + 1
-
-    return all_logs
-
 
 def fetch_all_pool_events(from_block: int, to_block: int) -> dict:
     contract = w3.eth.contract(
@@ -257,18 +115,6 @@ def fetch_all_pool_events(from_block: int, to_block: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Serialization
-# ---------------------------------------------------------------------------
-
-def _serialize(v: Any) -> Any:
-    if isinstance(v, bytes):
-        return "0x" + v.hex()
-    if isinstance(v, int) and abs(v) > 2**53:
-        return str(v)
-    return v
-
-
-# ---------------------------------------------------------------------------
 # Pool state queries
 # ---------------------------------------------------------------------------
 
@@ -276,7 +122,7 @@ def get_pool_state() -> dict:
     """Query current pool state: fee tier, slot0, liquidity, tick spacing."""
     pool = w3.eth.contract(
         address=Web3.to_checksum_address(POOL_ADDRESS),
-        abi=POOL_STATE_ABI,
+        abi=POOL_ABI,
     )
     fee_tier = pool.functions.fee().call()
     slot0 = pool.functions.slot0().call()
@@ -343,20 +189,11 @@ def save_cache(pool_events: dict, vault_tx_hashes: set, pool_state: dict, vault_
         "vault_balances": vault_balances,
         "cached_at": datetime.now(tz=timezone.utc).isoformat(),
     }
-    with open(CACHE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-    total = sum(len(v) for v in pool_events.values())
-    print(f"Cached {total} events to {CACHE_FILE}")
+    _save_cache(CACHE_FILE, data)
 
 
 def load_cache() -> dict | None:
-    if not CACHE_FILE.exists():
-        return None
-    with open(CACHE_FILE) as f:
-        data = json.load(f)
-    total = sum(len(v) for v in data.get("events", {}).values())
-    print(f"Loaded cache: {total} events, cached at {data.get('cached_at', '?')}")
-    return data
+    return _load_cache(CACHE_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -409,57 +246,9 @@ def match_vault_events(pool_events: dict, vault_tx_hashes: set) -> dict:
 
 
 def classify_transactions(vault_events: dict) -> dict:
-    """Classify vault txs: rebalance, claim, deposit, withdrawal."""
-    tx_ev = defaultdict(lambda: {"Mint": [], "Burn": [], "Collect": []})
-    for etype in ["Mint", "Burn", "Collect"]:
-        for e in vault_events.get(etype, []):
-            tx = e.get("tx_hash", "").lower()
-            if tx:
-                tx_ev[tx][etype].append(e)
-
-    categories = {}
-    claim_fees = [0.0, 0.0]
-    rebal_fees = [0.0, 0.0]
-
-    for tx, ev in tx_ev.items():
-        has_mint = len(ev["Mint"]) > 0
-        has_burn = len(ev["Burn"]) > 0
-        has_collect = len(ev["Collect"]) > 0
-        all_burns_zero = has_burn and all(
-            int(b["args"]["amount"]) == 0 for b in ev["Burn"]
-        )
-        real_burn = has_burn and not all_burns_zero
-
-        if real_burn and has_mint:
-            categories[tx] = "rebalance"
-            for c in ev["Collect"]:
-                rebal_fees[0] += int(c["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                rebal_fees[1] += int(c["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-            for b in ev["Burn"]:
-                rebal_fees[0] -= int(b["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                rebal_fees[1] -= int(b["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-        elif (all_burns_zero or not has_burn) and has_collect and not has_mint:
-            categories[tx] = "claim"
-            for c in ev["Collect"]:
-                claim_fees[0] += int(c["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                claim_fees[1] += int(c["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-        elif has_mint and not real_burn:
-            categories[tx] = "deposit"
-        elif real_burn and not has_mint:
-            categories[tx] = "withdrawal"
-            # Fees from withdrawal = Collect - Burn (same as rebalance)
-            for c in ev["Collect"]:
-                rebal_fees[0] += int(c["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                rebal_fees[1] += int(c["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-            for b in ev["Burn"]:
-                rebal_fees[0] -= int(b["args"]["amount0"]) / 10**DECIMALS_TOKEN0
-                rebal_fees[1] -= int(b["args"]["amount1"]) / 10**DECIMALS_TOKEN1
-
-    return {
-        "categories": categories,
-        "claim_fees": claim_fees,
-        "rebal_fees": [max(0, f) for f in rebal_fees],
-    }
+    return _classify_transactions(
+        vault_events, DECIMALS_TOKEN0, DECIMALS_TOKEN1, include_withdrawal_fees=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -675,158 +464,24 @@ def compute_capital_efficiency(
 
 
 # ---------------------------------------------------------------------------
-# Timeline builders
+# Timeline builders (wrappers around common functions with chutes-specific params)
 # ---------------------------------------------------------------------------
 
+def _chutes_price_fn(tick_lower: int, tick_upper: int) -> tuple[float, float]:
+    """Price callback for xSN64/USDC — inverted price, swap min/max."""
+    price_at_tl = tick_to_price(tick_lower)
+    price_at_tu = tick_to_price(tick_upper)
+    return min(price_at_tl, price_at_tu), max(price_at_tl, price_at_tu)
+
+
 def build_position_timeline(vault_events: dict) -> pd.DataFrame:
-    rows = []
-    for event_type in ["Mint", "Burn"]:
-        for evt in vault_events.get(event_type, []):
-            args = evt.get("args", {})
-            tick_lower = int(args.get("tickLower", 0))
-            tick_upper = int(args.get("tickUpper", 0))
-            amount0 = int(args.get("amount0", 0))
-            amount1 = int(args.get("amount1", 0))
-            liquidity = int(args.get("amount", 0))
-
-            if event_type == "Burn" and liquidity == 0:
-                continue
-            if abs(tick_lower) > 500000 or abs(tick_upper) > 500000:
-                continue
-
-            # tick_lower → higher USDC price, tick_upper → lower USDC price (inverted)
-            price_at_tick_lower = tick_to_price(tick_lower)
-            price_at_tick_upper = tick_to_price(tick_upper)
-            price_lower = min(price_at_tick_lower, price_at_tick_upper)
-            price_upper = max(price_at_tick_lower, price_at_tick_upper)
-
-            rows.append({
-                "block": evt.get("block", 0),
-                "tx_hash": evt.get("tx_hash", ""),
-                "event_type": event_type,
-                "tick_lower": tick_lower,
-                "tick_upper": tick_upper,
-                "price_lower": price_lower,
-                "price_upper": price_upper,
-                "range_width_pct": ((price_upper - price_lower) / price_lower * 100)
-                                   if price_lower > 0 else 0,
-                "amount0": amount0 / 10**DECIMALS_TOKEN0,
-                "amount1": amount1 / 10**DECIMALS_TOKEN1,
-                "liquidity": liquidity,
-            })
-
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values("block").reset_index(drop=True)
-    return df
-
-
-def build_range_segments(timeline: pd.DataFrame) -> list[dict]:
-    active: dict[tuple, list] = {}
-    segments = []
-
-    for _, row in timeline.iterrows():
-        key = (row["tick_lower"], row["tick_upper"])
-
-        if row["event_type"] == "Mint":
-            if key not in active:
-                active[key] = []
-            active[key].append({
-                "start_block": row["block"],
-                "liquidity": row["liquidity"],
-                "price_lower": row["price_lower"],
-                "price_upper": row["price_upper"],
-                "range_width_pct": row["range_width_pct"],
-            })
-
-        elif row["event_type"] == "Burn":
-            if key in active and active[key]:
-                pos = active[key].pop(0)
-                segments.append({
-                    "start_block": pos["start_block"],
-                    "end_block": row["block"],
-                    "tick_lower": key[0],
-                    "tick_upper": key[1],
-                    "price_lower": pos["price_lower"],
-                    "price_upper": pos["price_upper"],
-                    "range_width_pct": pos["range_width_pct"],
-                    "liquidity": pos["liquidity"],
-                    "closed": True,
-                })
-                if not active[key]:
-                    del active[key]
-
-    for key, positions in active.items():
-        for pos in positions:
-            segments.append({
-                "start_block": pos["start_block"],
-                "end_block": None,
-                "tick_lower": key[0],
-                "tick_upper": key[1],
-                "price_lower": pos["price_lower"],
-                "price_upper": pos["price_upper"],
-                "range_width_pct": pos["range_width_pct"],
-                "liquidity": pos["liquidity"],
-                "closed": False,
-            })
-
-    return segments
+    return _build_position_timeline(
+        vault_events, DECIMALS_TOKEN0, DECIMALS_TOKEN1, _chutes_price_fn
+    )
 
 
 def build_price_timeline(swap_events: list) -> pd.DataFrame:
-    rows = []
-    for evt in swap_events:
-        args = evt.get("args", {})
-        sqrt_price = int(args.get("sqrtPriceX96", 0))
-        if sqrt_price > 0:
-            price = sqrt_price_to_usdc_per_xsn64(sqrt_price)
-            rows.append({
-                "block": evt.get("block", 0),
-                "price": price,
-                "tick": int(args.get("tick", 0)),
-            })
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values("block").reset_index(drop=True)
-    return df
-
-
-def build_block_timestamps(blocks: list[int]) -> dict[int, datetime]:
-    unique = sorted(set(blocks))
-    if not unique:
-        return {}
-
-    if len(unique) > 60:
-        step = max(1, len(unique) // 60)
-        sample = unique[::step]
-        if unique[-1] not in sample:
-            sample.append(unique[-1])
-        if unique[0] not in sample:
-            sample.insert(0, unique[0])
-    else:
-        sample = unique
-
-    print(f"  Fetching timestamps for {len(sample)} sampled blocks...")
-    block_ts = {}
-    for b in sample:
-        try:
-            block_ts[b] = get_block_timestamp(b)
-        except Exception:
-            pass
-
-    if len(block_ts) >= 2:
-        sorted_known = sorted(block_ts.items())
-        for b in unique:
-            if b not in block_ts:
-                for i in range(len(sorted_known) - 1):
-                    b0, t0 = sorted_known[i]
-                    b1, t1 = sorted_known[i + 1]
-                    if b0 <= b <= b1:
-                        frac = (b - b0) / (b1 - b0) if b1 != b0 else 0
-                        block_ts[b] = int(t0 + frac * (t1 - t0))
-                        break
-
-    return {b: datetime.fromtimestamp(ts, tz=timezone.utc) for b, ts in block_ts.items()}
+    return _build_price_timeline(swap_events, sqrt_price_to_usdc_per_xsn64)
 
 
 # ---------------------------------------------------------------------------
