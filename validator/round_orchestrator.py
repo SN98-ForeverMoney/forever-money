@@ -381,6 +381,7 @@ class AsyncRoundOrchestrator:
         for i in range(0, len(items), SCORE_UPDATE_BATCH_SIZE):
             batch = items[i : i + SCORE_UPDATE_BATCH_SIZE]
             await asyncio.gather(*[_update_one(uid, data) for uid, data in batch])
+
         logger.info(f"{tag} Completed evaluation round {round_number}")
 
     async def _select_winner(
@@ -558,6 +559,7 @@ class AsyncRoundOrchestrator:
             winner_uid=winner_uid if result["accepted"] else None,
             performance_data={"score": result.get("score", 0)},
         )
+
         logger.info(f"{tag} Completed LIVE round {round_number}")
 
     async def _run_with_miner_for_live(
