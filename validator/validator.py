@@ -365,6 +365,9 @@ async def run_jobs_validator(config):
                 orchestrator.metagraph = metagraph_new
                 emissions_service.metagraph = metagraph_new
 
+                # Re-check for new miners that need vault registration
+                await orchestrator._check_and_register_new_miners_in_db()
+
                 logger.info("Running weight setting cycle...")
                 await emissions_service.set_weights_on_chain(wallet, config["netuid"])
                 await asyncio.sleep(weight_set_interval)
