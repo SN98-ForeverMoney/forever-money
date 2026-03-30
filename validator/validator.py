@@ -288,6 +288,10 @@ async def run_jobs_validator(config):
                     await asyncio.sleep(check_interval)
                     continue
 
+                # Register miner vaults before starting jobs
+                if orchestrator.require_vault_for_evaluation:
+                    await orchestrator._check_and_register_new_miners_in_db()
+
                 # Check for new jobs
                 for job in active_jobs:
                     if job.job_id not in running_jobs:

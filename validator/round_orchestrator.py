@@ -237,10 +237,6 @@ class AsyncRoundOrchestrator:
         if job.job_id not in self.round_numbers:
             await self._initialize_round_numbers(job)
 
-        # Register miner vaults once at startup before entering the round loop
-        if self.require_vault_for_evaluation:
-            await self._check_and_register_new_miners_in_db()
-
         while True:
             try:
                 await asyncio.gather(
