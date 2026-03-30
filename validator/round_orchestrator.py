@@ -179,17 +179,17 @@ class AsyncRoundOrchestrator:
             )
 
             if not responses or len(responses) == 0:
-                logger.debug(f"No response from miner {miner_uid}")
+                logger.info(f"Miner {miner_uid} vault query: no response")
                 return
 
             response = responses[0]
 
             if response is None:
-                logger.debug(f"Miner {miner_uid} returned None")
+                logger.info(f"Miner {miner_uid} vault query: returned None")
                 return
 
             if not response.has_vault:
-                logger.debug(f"Miner {miner_uid} has no vault configured")
+                logger.info(f"Miner {miner_uid} vault query: has_vault=False")
                 return
 
             # Miner has a vault - register it
