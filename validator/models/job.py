@@ -276,6 +276,7 @@ TORTOISE_ORM = {
                 "validator.models.job",
                 "validator.models.miner_vault",
                 "validator.models.miner_tracking",
+                "validator.models.fee_snapshot",
                 "aerich.models",
             ],
             "default_connection": "default",
@@ -300,6 +301,7 @@ async def init_db(db_url: Optional[str] = None, schema: Optional[str] = None):
                     "validator.models.job",
                     "validator.models.miner_vault",
                     "validator.models.miner_tracking",
+                    "validator.models.fee_snapshot",
                     "validator.models.pool_events",
                 ]
             },
