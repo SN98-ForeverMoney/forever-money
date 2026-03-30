@@ -120,9 +120,11 @@ class AsyncRoundOrchestrator:
         For each unregistered miner, send a VaultRegistrationQuery to get
         their vault address, then register and verify it.
         """
-        # 1. Get all active miners from metagraph
+        # 1. Get all active miners from metagraph (staked OR whitelisted)
         metagraph_uids = [
-            uid for uid in range(len(self.metagraph.S)) if self.metagraph.S[uid] > 0
+            uid for uid in range(len(self.metagraph.S))
+            if self.metagraph.S[uid] > 0
+            or is_miner_whitelisted(self.metagraph.hotkeys[uid])
         ]
 
         if not metagraph_uids:
