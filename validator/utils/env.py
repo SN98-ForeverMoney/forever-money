@@ -137,12 +137,12 @@ MINER_ELIGIBILITY_DAYS = get_env_variable(
 REQUIRE_VAULT_FOR_EVALUATION = get_env_variable(
     name="REQUIRE_VAULT_FOR_EVALUATION",
     type_=str,
-    default="false",
+    default="true",
 ).lower() == "true"
 
 DEFAULT_MINIMUM_VAULT_BALANCE_USD = get_env_variable(
     name="DEFAULT_MINIMUM_VAULT_BALANCE_USD",
     type_=float,
-    default=1000.0,
+    default=75.0,
 )
 
