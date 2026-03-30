@@ -333,7 +333,7 @@ async def run_jobs_validator(config):
 
     async def monitor_and_set_weights():
         """Continuously calculate and set weights. Resyncs metagraph and zeroes out replaced hotkeys."""
-        weight_set_interval = 1200  # 20 mins
+        weight_set_interval = 360 * 12  # 1 tempo (360 blocks * ~12s/block = 72 mins)
 
         while True:
             try:
