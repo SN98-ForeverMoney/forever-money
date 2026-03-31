@@ -432,7 +432,7 @@ class AsyncRoundOrchestrator:
             has_vault = await self.vault_service.is_miner_eligible_for_evaluation(
                 miner_uid=winner_uid,
                 require_verified=True,
-                require_minimum_balance=True,
+                require_minimum_balance=False,
             )
             if not has_vault:
                 logger.info(
