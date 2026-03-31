@@ -302,7 +302,7 @@ class SN98Miner:
         logger.info(
             f"Calculated volatility factor as {volatility} using recent prices: {list(self.recent_prices[vault_address])}"
         )
-        min_width = tick_spacing * 10
+        min_width = tick_spacing * 25
         width = max(volatility * self.width_factor, min_width)
 
         amount0 = int(inventory["amount0"]) if inventory["amount0"] else 0
@@ -520,7 +520,7 @@ class SN98Miner:
                         )
 
                 volatility = self.compute_volatility(self.recent_prices.get(vault_address, deque()))
-                min_width = tick_spacing * 10
+                min_width = tick_spacing * 25
                 computed_width = max(volatility * self.width_factor, min_width)
 
                 new_position = None
