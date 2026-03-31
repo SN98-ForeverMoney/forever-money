@@ -354,9 +354,13 @@ class JobRepository:
         """
         Get miners eligible for live mode (participated for 7+ days).
 
+        Returns all eligible miners sorted by score descending, including
+        those with negative scores. The caller (live round) picks the best
+        whitelisted miner regardless of score sign.
+
         Args:
             job_id: Job identifier
-            min_score: Minimum combined score threshold
+            min_score: Unused (kept for API compatibility)
 
         Returns:
             List of eligible MinerScore objects, sorted by score descending.
@@ -364,12 +368,9 @@ class JobRepository:
         """
         job = await Job.get(job_id=job_id)
 
-        # Combined score must be strictly > 0 (exclude zero)
-        score_threshold = max(0.0, min_score)
         scores = await MinerScore.filter(
             job=job,
             is_eligible_for_live=True,
-            combined_score__gt=Decimal(str(score_threshold)),
         ).order_by("-combined_score", "-total_evaluations", "-total_live_rounds")
 
         return scores
