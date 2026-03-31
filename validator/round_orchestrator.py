@@ -213,6 +213,24 @@ class AsyncRoundOrchestrator:
                 logger.info(
                     f"Successfully registered and verified vault for miner {miner_uid}"
                 )
+                # Take initial balance snapshot so minimum balance checks work
+                try:
+                    active_jobs = await self.job_repository.get_active_jobs()
+                    for job in active_jobs:
+                        try:
+                            snapshot = await self.vault_service.check_vault_balance(
+                                vault, job.pair_address
+                            )
+                            if snapshot and snapshot.total_value_usd > 0:
+                                logger.info(
+                                    f"Initial balance snapshot for miner {miner_uid} "
+                                    f"(via pool {job.pair_address}): ${snapshot.total_value_usd}"
+                                )
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.warning(f"Failed to take initial balance snapshot for miner {miner_uid}: {e}")
             else:
                 logger.warning(
                     f"Registered vault for miner {miner_uid} but verification failed "
@@ -287,7 +305,7 @@ class AsyncRoundOrchestrator:
             eligible_uids = await self.vault_service.filter_eligible_miners(
                 miner_uids=active_uids,
                 require_verified=True,
-                require_minimum_balance=False,
+                require_minimum_balance=True,
             )
             logger.info(
                 f"{tag} Vault filtering: {len(active_uids)} active miners -> "
@@ -432,7 +450,7 @@ class AsyncRoundOrchestrator:
             has_vault = await self.vault_service.is_miner_eligible_for_evaluation(
                 miner_uid=winner_uid,
                 require_verified=True,
-                require_minimum_balance=False,
+                require_minimum_balance=True,
             )
             if not has_vault:
                 logger.info(

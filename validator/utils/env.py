@@ -143,6 +143,6 @@ REQUIRE_VAULT_FOR_EVALUATION = get_env_variable(
 DEFAULT_MINIMUM_VAULT_BALANCE_USD = get_env_variable(
     name="DEFAULT_MINIMUM_VAULT_BALANCE_USD",
     type_=float,
-    default=75.0,
+    default=50.0,
 )
 
