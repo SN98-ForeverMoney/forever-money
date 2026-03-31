@@ -337,6 +337,7 @@ class VaultService:
                 token1,
                 token1_balance,
                 vault.chain_id,
+                pool_address=pool_address,
             )
 
             # Save snapshot
@@ -360,6 +361,18 @@ class VaultService:
             logger.error(f"Error checking vault balance: {e}")
             return None
 
+    # Known stablecoins (address -> decimals) on Base. Treated as $1.
+    STABLECOINS = {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": 6,   # USDC
+        "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": 6,   # USDbC
+        "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": 18,  # DAI
+    }
+    # Known "bridge" tokens whose USD price we can fetch reliably.
+    KNOWN_TOKENS = {
+        "0x4200000000000000000000000000000000000006": ("WETH", 18),
+        "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": ("cbBTC", 8),
+    }
+
     async def _calculate_vault_value_usd(
         self,
         token0_address: str,
@@ -367,52 +380,89 @@ class VaultService:
         token1_address: str,
         token1_balance: int,
         chain_id: int,
+        pool_address: str = None,
     ) -> Decimal:
         """
         Calculate the USD value of vault holdings.
 
-        Args:
-            token0_address: Token0 contract address
-            token0_balance: Token0 balance in wei
-            token1_address: Token1 contract address
-            token1_balance: Token1 balance in wei
-            chain_id: Blockchain chain ID
-
-        Returns:
-            Total value in USD
+        Strategy:
+        1. If a token is a stablecoin, its price is $1 (adjusted for decimals).
+        2. For the other token, try CoinGecko/price service.
+        3. Fallback: use the pool's sqrtPriceX96 to derive the unknown token's
+           price from the known one.
         """
+        t0 = token0_address.lower()
+        t1 = token1_address.lower()
+
+        price0: float = None
+        price1: float = None
+        dec0 = 18
+        dec1 = 18
+
+        # Check stablecoins
+        if t0 in self.STABLECOINS:
+            price0 = 1.0
+            dec0 = self.STABLECOINS[t0]
+        if t1 in self.STABLECOINS:
+            price1 = 1.0
+            dec1 = self.STABLECOINS[t1]
+
+        # Check known tokens for decimals
+        if t0 in self.KNOWN_TOKENS:
+            dec0 = self.KNOWN_TOKENS[t0][1]
+        if t1 in self.KNOWN_TOKENS:
+            dec1 = self.KNOWN_TOKENS[t1][1]
+
+        # Try price service for unknowns
         if self.price_service:
+            if price0 is None:
+                try:
+                    price0 = await self.price_service.get_token_price(token0_address, chain_id)
+                except Exception:
+                    pass
+            if price1 is None:
+                try:
+                    price1 = await self.price_service.get_token_price(token1_address, chain_id)
+                except Exception:
+                    pass
+
+        # Fallback: use pool price to derive the unknown from the known
+        if (price0 is None or price1 is None) and pool_address:
             try:
-                # Get prices from price service
-                price0 = await self.price_service.get_token_price(
-                    token0_address, chain_id
-                )
-                price1 = await self.price_service.get_token_price(
-                    token1_address, chain_id
-                )
+                w3 = AsyncWeb3Helper.make_web3(chain_id)
+                pool = w3.make_contract_by_name("ICLPool", pool_address)
+                slot0 = await pool.functions.slot0().call()
+                sqrt_price_x96 = slot0[0]
+                # price = (sqrtPriceX96 / 2^96)^2 gives token1/token0 in raw units
+                # Adjust for decimals: price_human = price_raw * 10^(dec0 - dec1)
+                price_raw = (sqrt_price_x96 / (2**96)) ** 2
+                pool_price = price_raw * (10 ** (dec0 - dec1))  # token1 per token0
 
-                # Assume 18 decimals for simplicity (should check actual decimals)
-                value0 = (
-                    Decimal(str(token0_balance))
-                    / Decimal("1e18")
-                    * Decimal(str(price0))
-                )
-                value1 = (
-                    Decimal(str(token1_balance))
-                    / Decimal("1e18")
-                    * Decimal(str(price1))
-                )
-
-                return value0 + value1
+                if price0 is not None and price1 is None and pool_price > 0:
+                    # price1 = price0 / pool_price (since pool_price = token1/token0)
+                    price1 = price0 / pool_price
+                    logger.info(f"Derived price1 from pool: ${price1:.4f} (pool_price={pool_price:.6f})")
+                elif price1 is not None and price0 is None and pool_price > 0:
+                    price0 = price1 * pool_price
+                    logger.info(f"Derived price0 from pool: ${price0:.4f} (pool_price={pool_price:.6f})")
             except Exception as e:
-                logger.warning(f"Could not get token prices: {e}")
+                logger.warning(f"Pool price fallback failed: {e}")
 
-        # Fallback: estimate based on balance (very rough)
-        # In production, always use actual prices
-        total_balance = token0_balance + token1_balance
-        # Assume ~$1 per token for estimation (placeholder)
-        estimated_value = Decimal(str(total_balance)) / Decimal("1e18")
-        return estimated_value
+        # If still missing, default to 0
+        if price0 is None:
+            price0 = 0.0
+        if price1 is None:
+            price1 = 0.0
+
+        value0 = Decimal(str(token0_balance)) / Decimal(10**dec0) * Decimal(str(price0))
+        value1 = Decimal(str(token1_balance)) / Decimal(10**dec1) * Decimal(str(price1))
+
+        total = value0 + value1
+        logger.info(
+            f"Vault value: token0={token0_balance} (${value0:.2f}), "
+            f"token1={token1_balance} (${value1:.2f}), total=${total:.2f}"
+        )
+        return total
 
     async def is_miner_eligible_for_evaluation(
         self,
