@@ -55,7 +55,7 @@ class EmissionsService:
             return revenue
         except Exception as e:
             logger.error(f"Failed to get vault revenue: {e}")
-            raise
+            return 0.0
 
     async def calculate_emissions_split(self) -> Tuple[float, float]:
         """
