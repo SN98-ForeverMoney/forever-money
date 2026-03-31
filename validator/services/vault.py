@@ -413,18 +413,21 @@ class VaultService:
         if t1 in self.KNOWN_TOKENS:
             dec1 = self.KNOWN_TOKENS[t1][1]
 
-        # Try price service for unknowns
-        if self.price_service:
-            if price0 is None:
-                try:
-                    price0 = await self.price_service.get_token_price(token0_address, chain_id)
-                except Exception:
-                    pass
-            if price1 is None:
-                try:
-                    price1 = await self.price_service.get_token_price(token1_address, chain_id)
-                except Exception:
-                    pass
+        # Try price service for unknowns (use class method directly if no instance)
+        for addr, is_t0 in [(token0_address, True), (token1_address, False)]:
+            if (is_t0 and price0 is not None) or (not is_t0 and price1 is not None):
+                continue
+            try:
+                if self.price_service:
+                    p = await self.price_service.get_token_price(addr, chain_id)
+                else:
+                    p = await PriceService.get_token_price(addr, chain_id)
+                if is_t0:
+                    price0 = p
+                else:
+                    price1 = p
+            except Exception:
+                pass
 
         # Fallback: use pool price to derive the unknown from the known
         if (price0 is None or price1 is None) and pool_address:
