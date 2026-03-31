@@ -305,7 +305,7 @@ class AsyncRoundOrchestrator:
             eligible_uids = await self.vault_service.filter_eligible_miners(
                 miner_uids=active_uids,
                 require_verified=True,
-                require_minimum_balance=True,
+                require_minimum_balance=False,
             )
             logger.info(
                 f"{tag} Vault filtering: {len(active_uids)} active miners -> "
@@ -450,7 +450,7 @@ class AsyncRoundOrchestrator:
             has_vault = await self.vault_service.is_miner_eligible_for_evaluation(
                 miner_uid=winner_uid,
                 require_verified=True,
-                require_minimum_balance=True,
+                require_minimum_balance=False,
             )
             if not has_vault:
                 logger.info(
