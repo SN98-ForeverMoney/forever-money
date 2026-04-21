@@ -1,0 +1,36 @@
+pools:
+- address: '0x1024c20c048ea6087293f46d4a1c042cb6705924'
+  symbol: WETH/BID
+  token0: '0x4200000000000000000000000000000000000006'
+  token1: '0xa1832f7F4e534aE557f9B5AB76dE54B1873e498B'
+  decimals0: 18
+  decimals1: 18
+  fee_tier: 2700
+  tick_spacing: 200
+  range:
+    type: tick_width
+    width_ticks: 4000
+  position_size_usd: 10000
+  position_size_token1_raw: 303566836076887586897920
+  tx_cost_usd: 0.01
+  tx_cost_token1_raw: 303566836076887616
+  slippage_bps: 2
+  action_delay_blocks: 15
+backtest:
+  start_block: 38858900
+  end_block: 44042900
+prediction:
+  horizon_blocks: 300
+  noise_sigma: 0.2
+  vol_bucket_blocks: 30
+strategy:
+  type: volatility_miner
+  params:
+    width_factor: 3.0
+    volatility_window: 10
+    min_width_spacings: 25
+    edge_buffer_pct: 0.2
+    dust_threshold: 10000
+    exit_vol_threshold: 0.003
+    reentry_vol_threshold: 0.0015
+seed: 42

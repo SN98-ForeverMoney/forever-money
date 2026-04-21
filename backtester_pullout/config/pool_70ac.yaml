@@ -1,0 +1,38 @@
+pools:
+  - address: "0x70acdf2ad0bf2402c957154f944c19ef4e1cbae1"
+    symbol: "?/?"
+    token0: "0x0000000000000000000000000000000000000000"
+    token1: "0x0000000000000000000000000000000000000000"
+    decimals0: 18
+    decimals1: 18
+    fee_tier: 500
+    tick_spacing: 10
+    range:
+      type: "tick_width"
+      width_ticks: 200
+    position_size_usd: 10000
+    tx_cost_usd: 0.01
+    slippage_bps: 2
+    action_delay_blocks: 15
+
+backtest:
+  start_block: 40154914
+  end_block: 44042900
+
+prediction:
+  horizon_blocks: 300
+  noise_sigma: 0.50
+  vol_bucket_blocks: 30
+
+strategy:
+  type: volatility_miner
+  params:
+    width_factor: 3.0
+    volatility_window: 10
+    min_width_spacings: 25
+    edge_buffer_pct: 0.20
+    dust_threshold: 10000
+    exit_vol_threshold: 0.003
+    reentry_vol_threshold: 0.0015
+
+seed: 42

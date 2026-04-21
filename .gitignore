@@ -52,6 +52,9 @@ miner.log
 winning_strategy.json
 *.json.backup
 
+# Backtester output (2GB+ of run artifacts)
+results/
+
 # Database
 *.db
 *.sqlite

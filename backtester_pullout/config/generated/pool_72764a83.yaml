@@ -1,0 +1,36 @@
+pools:
+- address: '0x72764a83b78074e517fd1e2da8c4c289020c6498'
+  symbol: USDC/xSN64
+  token0: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+  token1: '0xbAdd3F2d84605032C1B2AD8cBebb4700Dcd9D7dE'
+  decimals0: 6
+  decimals1: 18
+  fee_tier: 3000
+  tick_spacing: 200
+  range:
+    type: tick_width
+    width_ticks: 4000
+  position_size_usd: 10000
+  position_size_token1_raw: 387013413297471815680
+  tx_cost_usd: 0.01
+  tx_cost_token1_raw: 387013413297471
+  slippage_bps: 2
+  action_delay_blocks: 15
+backtest:
+  start_block: 38858900
+  end_block: 44042900
+prediction:
+  horizon_blocks: 300
+  noise_sigma: 0.2
+  vol_bucket_blocks: 30
+strategy:
+  type: volatility_miner
+  params:
+    width_factor: 3.0
+    volatility_window: 10
+    min_width_spacings: 25
+    edge_buffer_pct: 0.2
+    dust_threshold: 10000
+    exit_vol_threshold: 0.003
+    reentry_vol_threshold: 0.0015
+seed: 42

@@ -1,0 +1,36 @@
+pools:
+- address: '0x9baa2635cc6e65042b4f11a397d8a8aba5255777'
+  symbol: USDC/xSN8
+  token0: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+  token1: '0xD321054982b8Aa84785c21E1e2371ebf2e00Eb47'
+  decimals0: 6
+  decimals1: 18
+  fee_tier: 3000
+  tick_spacing: 200
+  range:
+    type: tick_width
+    width_ticks: 4000
+  position_size_usd: 10000
+  position_size_token1_raw: 932974725923097411584
+  tx_cost_usd: 0.01
+  tx_cost_token1_raw: 932974725923097
+  slippage_bps: 2
+  action_delay_blocks: 15
+backtest:
+  start_block: 38858900
+  end_block: 44042900
+prediction:
+  horizon_blocks: 300
+  noise_sigma: 0.2
+  vol_bucket_blocks: 30
+strategy:
+  type: volatility_miner
+  params:
+    width_factor: 3.0
+    volatility_window: 10
+    min_width_spacings: 25
+    edge_buffer_pct: 0.2
+    dust_threshold: 10000
+    exit_vol_threshold: 0.003
+    reentry_vol_threshold: 0.0015
+seed: 42

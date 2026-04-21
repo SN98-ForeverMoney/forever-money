@@ -1,0 +1,40 @@
+pools:
+- address: '0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59'
+  symbol: ETH/USDC
+  token0: '0x4200000000000000000000000000000000000006'
+  token1: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+  decimals0: 18
+  decimals1: 6
+  fee_tier: 562
+  tick_spacing: 100
+  range:
+    type: tick_width
+    width_ticks: 200
+  position_size_usd: 10000
+  tx_cost_usd: 0.01
+  slippage_bps: 200
+backtest:
+  start_block: 40000000
+  end_block: 40100000
+prediction:
+  horizon_blocks: 300
+  noise_sigma: 0.2
+  vol_bucket_blocks: 30
+strategy:
+  type: hysteresis_with_holding
+  params:
+    threshold_high: 0.015
+    threshold_low: 0.001
+    min_holding_blocks: 50
+sweep:
+  grid:
+    prediction.noise_sigma:
+    - 0.0
+    - 0.2
+    prediction.horizon_blocks:
+    - 300
+    - 900
+    strategy.params.threshold_high:
+    - 0.01
+    - 0.025
+seed: 42

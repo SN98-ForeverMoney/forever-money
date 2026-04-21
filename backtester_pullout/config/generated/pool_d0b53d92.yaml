@@ -1,0 +1,36 @@
+pools:
+- address: '0xd0b53d9277642d899df5c87a3966a349a798f224'
+  symbol: WETH/USDC
+  token0: '0x4200000000000000000000000000000000000006'
+  token1: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+  decimals0: 18
+  decimals1: 6
+  fee_tier: 500
+  tick_spacing: 10
+  range:
+    type: tick_width
+    width_ticks: 200
+  position_size_usd: 10000
+  position_size_token1_raw: 10000000000
+  tx_cost_usd: 0.01
+  tx_cost_token1_raw: 10000
+  slippage_bps: 2
+  action_delay_blocks: 15
+backtest:
+  start_block: 38858900
+  end_block: 44042900
+prediction:
+  horizon_blocks: 300
+  noise_sigma: 0.2
+  vol_bucket_blocks: 30
+strategy:
+  type: volatility_miner
+  params:
+    width_factor: 3.0
+    volatility_window: 10
+    min_width_spacings: 25
+    edge_buffer_pct: 0.2
+    dust_threshold: 10000
+    exit_vol_threshold: 0.003
+    reentry_vol_threshold: 0.0015
+seed: 42

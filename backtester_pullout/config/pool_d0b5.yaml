@@ -1,0 +1,40 @@
+# Test pool 0xd0b53D9277642d899DF5C87A3966A349A798F224 — last 30 days
+pools:
+  - address: "0xd0b53D9277642d899DF5C87A3966A349A798F224"
+    symbol: "?/?"
+    token0: "0x0000000000000000000000000000000000000000"
+    token1: "0x0000000000000000000000000000000000000000"
+    decimals0: 18
+    decimals1: 18
+    fee_tier: 500
+    tick_spacing: 10
+    range:
+      type: "tick_width"
+      width_ticks: 200
+    position_size_usd: 10000
+    tx_cost_usd: 0.01
+    slippage_bps: 200
+
+backtest:
+  start_block: 42746905
+  end_block: 44042900
+
+prediction:
+  horizon_blocks: 300
+  noise_sigma: 0.20
+  vol_bucket_blocks: 30
+
+strategy:
+  type: "hysteresis_with_holding"
+  params:
+    threshold_high: 0.015
+    threshold_low: 0.001
+    min_holding_blocks: 50
+
+sweep:
+  grid:
+    "prediction.noise_sigma": [0.0, 0.1, 0.2, 0.35]
+    "prediction.horizon_blocks": [300, 900, 1800]
+    "strategy.params.threshold_high": [0.005, 0.015, 0.03]
+
+seed: 42
