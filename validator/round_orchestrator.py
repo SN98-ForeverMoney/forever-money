@@ -1245,6 +1245,7 @@ class AsyncRoundOrchestrator:
             "positions": positions,
             "round_id": round_obj.round_id,
             "miner_uid": miner_uid,
+            "has_staking_enabled": bool(getattr(job, "is_staked", False)),
         }
 
         # Validate required fields

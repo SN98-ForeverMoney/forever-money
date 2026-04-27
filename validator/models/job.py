@@ -52,6 +52,7 @@ class Job(Model):
     target_ratio = fields.FloatField(default=0.5)
     chain_id = fields.IntField(default=8453)
     is_active = fields.BooleanField(default=True, db_index=True)
+    is_staked = fields.BooleanField(default=False)
     round_duration_seconds = fields.IntField(default=900)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
