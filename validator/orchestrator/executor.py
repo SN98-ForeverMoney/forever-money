@@ -54,6 +54,12 @@ async def execute_strategy_onchain(
         elif isinstance(pos, dict):
             positions.append(pos)
 
+    # Refresh is_staked from DB so toggles take effect without restart.
+    try:
+        await job.refresh_from_db(fields=["is_staked"])
+    except Exception as e:
+        logger.debug(f"is_staked refresh failed: {e}")
+
     payload = {
         "api_key": config.get("executor_bot_api_key"),
         "job_id": job.job_id,
