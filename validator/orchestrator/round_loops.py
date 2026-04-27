@@ -561,6 +561,9 @@ async def run_with_miner_for_live(
     current_block = start_block
     rtype = _round_type_str(round_)
     tick_spacing = await liq_manager.get_tick_spacing()
+    # Once an executor call fails for this round, stop attempting more on-chain
+    # executions — the issue is unlikely to fix itself within seconds.
+    execution_disabled = False
 
     while round_.round_deadline >= datetime.now(timezone.utc):
         if (current_block - start_block) % rebalance_check_interval == 0:
@@ -591,6 +594,11 @@ async def run_with_miner_for_live(
                     logger.debug(
                         f"Positions within {REBALANCE_TOLERANCE*100:.0f}% tolerance, "
                         f"skipping on-chain execution at block {current_block}"
+                    )
+                elif execution_disabled:
+                    logger.debug(
+                        f"Execution disabled for this round after prior failure "
+                        f"(block {current_block}, miner {miner_uid})"
                     )
                 else:
                     exec_result = await execute_strategy_onchain(
@@ -628,9 +636,11 @@ async def run_with_miner_for_live(
                         rebalances_so_far += 1
                     else:
                         execution_failures += 1
+                        execution_disabled = True
                         logger.error(
                             f"Failed to execute strategy on-chain for miner {miner_uid} "
-                            f"at block {current_block}: {exec_result.get('error')}"
+                            f"at block {current_block}: {exec_result.get('error')} — "
+                            f"disabling further executor calls for this round."
                         )
         else:
             await asyncio.sleep(1)
