@@ -1,25 +1,31 @@
-# Miner Registration Guide - Testnet
+# Miner Registration Guide
 
-This guide will help you get funds and register as a miner on the SN98 ForeverMoney subnet running on **Bittensor Testnet**.
+This guide gets you from zero to a registered, queryable miner on the SN98 **ForeverMoney** subnet — on either testnet or mainnet.
 
-> **⚠️ IMPORTANT NOTICE**
-> This is a test network.
+| Network  | NETUID | `btcli` flag      |
+|----------|-------:|-------------------|
+| mainnet  | **98** | `--network finney` (default) |
+| testnet  | **374** | `--network test`  |
+
+The flow is identical on both — substitute your `NETUID` and network. Examples below show **testnet** (`374`); add `--netuid 98` and `--network finney` for mainnet.
+
+> ⚠️ Mainnet registration costs real TAO and your miner will be live-scored. Test on testnet first.
 
 ## Prerequisites
 
 - `btcli` (Bittensor CLI) installed
-- Python 3.11+ with required dependencies
-
+- Python 3.11+
+- A deployed `SnLiquidityManager` vault on Base (chain `8453`) that you control. Without one, the validator's vault filter will skip you and you will not be queried. See [Vault Setup](#vault-setup) below.
 
 ## 💡 Pro Tip: Set Default Network
 
-To avoid typing `--network test` for every command, you can set it as your default:
+To avoid typing `--network` on every command:
 
 ```bash
-btcli config set --network test
+btcli config set --network test     # testnet
+# or
+btcli config set --network finney   # mainnet
 ```
-
-Now you can run commands like `btcli wallet list` without the network flag!
 
 
 ## Step 1: Create Your Miner Wallet
@@ -114,24 +120,31 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Configure Environment (Optional)
-
-Create a `.env` file with your configuration:
+### Configure Environment
 
 ```bash
-# Copy example file
 cp .env.example .env
-
-# Edit with your settings
 nano .env
 ```
 
-Set `SUBTENSOR_NETWORK=test` and `NETUID=374` in your `.env` file.
+Set in `.env`:
+- `SUBTENSOR_NETWORK=test` (or `finney` for mainnet)
+- `NETUID=374` (or `98` for mainnet)
+- `MINER_VAULT_ADDRESSES=["0xYourLiquidityManagerAddress"]` — JSON-encoded list (see Vault Setup below)
+- `MINER_VAULT_CHAIN_ID=8453`
 
+## Vault Setup
+
+The validator's vault-eligibility filter (`validator/round_orchestrator.py`) will only query miners that report a registered on-chain vault. Each miner must:
+
+1. Deploy or be granted ownership of an `SnLiquidityManager` contract on Base (chain `8453`).
+2. Register at least one Aerodrome/Uniswap V3 pool's AK token to a `PositionManager` on that vault.
+3. Stash some token0/token1 in the vault so live execution has inventory to deploy.
+4. Set `MINER_VAULT_ADDRESSES` so your miner's `vault_registration_handler` returns `has_vault=True` with the right address.
+
+If you don't yet have a vault, contact the team — vaults are deployed via the ForeverMoney webapp factory.
 
 ## Step 7: Run Your Miner
-
-Start your miner using Bittensor axon:
 
 ```bash
 python -m miner.miner \
@@ -142,30 +155,36 @@ python -m miner.miner \
 ```
 
 **Important flags:**
-- `--netuid 374` - SN98 ForeverMoney subnet ID
-- `--axon.port 8091` - Port for receiving validator queries (must be publicly accessible)
+- `--netuid` — `374` testnet, `98` mainnet
+- `--axon.port 8091` — port for receiving validator queries (must be publicly accessible)
 
 ### Port Forwarding
 
-**CRITICAL:** Your miner must be accessible from the internet for validators to query you.
+**CRITICAL:** Your axon must be reachable from the public internet for validators to query you.
 
-Make sure port **8091** (or your chosen axon port) is:
+Ensure port `8091` (or your chosen `--axon.port`) is:
 1. Open in your firewall
 2. Forwarded in your router (if behind NAT)
-3. Accessible from the internet
+3. Reachable externally
 
-Test accessibility:
+Bittensor axons do not expose `/health`. Verify reachability via the metagraph instead:
+
 ```bash
-# From another machine
-curl http://YOUR_PUBLIC_IP:8091/health
+btcli s metagraph --netuid 374
 ```
 
-## Step 8: Monitor Your Miner
+Find your hotkey row — the `axon` column should show a public `<ip>:<port>`. If it shows `0.0.0.0:0`, your `axon.serve` call hasn't propagated yet (wait ~1 epoch) or your IP is unreachable.
 
-### Check Logs
+## Step 8: Monitor Your Miner
 
 ```bash
 tail -f miner.log
 ```
+
+Look for incoming `RebalanceQuery` and `VaultRegistrationQuery` calls.
+
+## Eligibility for Live Execution
+
+You start in **evaluation-only** mode. After `MINER_ELIGIBILITY_DAYS` of consistent participation (env var on the validator; default 7, currently `1` in production), you become eligible for live on-chain execution. Until then, only your eval scores matter — no live payload is dispatched to the executor for your hotkey.
 
 Good luck mining! 🚀

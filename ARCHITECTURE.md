@@ -13,26 +13,30 @@ SN98 is a decentralized Automated Liquidity Manager (ALM) built on Bittensor. Th
 │  │   Miners     │◄────────────►│       Validator              │  │
 │  │  (N nodes)   │              │    (Jobs Orchestrator)       │  │
 │  └──────────────┘              └──────────────────────────────┘  │
-│       │                                    │                     │
-│       │ RebalanceQuery                     │ Job Management      │
-│       │ (Dynamic decisions)                │                     │
+│       │  ▲                                 │                     │
+│       │  │ VaultRegistrationQuery          │                     │
+│       │  └─ RebalanceQuery (eval + live)   │                     │
 │       └────────────────────────────────────┘                     │
 └──────────────────────────────────────────────────────────────────┘
                                               │
-                    ┌─────────────────────────┼──────────────────────┐
-                    │                         │                      │
-          ┌─────────▼──────────┐    ┌─────────▼───────┐   ┌──────────▼──────┐
-          │   Jobs Database    │    │  Pool Events DB │   │  Blockchain RPC │
-          │  (Tortoise ORM)    │    │  (Read-only)    │   │    (Base L2)    │
-          │                    │    │                 │   │                 │
-          │ • jobs             │    │ • swaps         │   │ • Current state │
-          │ • rounds           │    │ • mints         │   │ • Price feeds   │
-          │ • predictions      │    │ • burns         │   │ • Execution     │
-          │ • miner_scores     │    │ • collects      │   │                 │
-          │ • participations   │    │                 │   │                 │
-          │ • live_executions  │    │                 │   │                 │
-          └────────────────────┘    └─────────────────┘   └─────────────────┘
+        ┌─────────────────────┬───────────────┼─────────────────────────┐
+        │                     │               │                         │
+┌───────▼─────────┐ ┌─────────▼───────┐ ┌─────▼────────────┐ ┌──────────▼─────┐
+│ Jobs Database   │ │ Pool Events DB  │ │  Executor Bot    │ │ Blockchain RPC │
+│ (Tortoise ORM)  │ │  (Read-only)    │ │  (HTTP service)  │ │   (Base L2)    │
+│                 │ │                 │ │                  │ │                │
+│ • jobs          │ │ • swaps         │ │ /execute_strategy│ │ • Current state│
+│ • rounds        │ │ • mints         │ │   → Safe mint/   │ │ • Price feeds  │
+│ • predictions   │ │ • burns         │ │     burn         │ │ • Receipts     │
+│ • miner_scores  │ │ • collects      │ │ /execute_swap    │ │                │
+│ • participations│ │                 │ │   → Safe AK swap │ │                │
+│ • live_         │ │                 │ │                  │ │                │
+│   executions    │ │                 │ │                  │ │                │
+│ • fee_snapshots │ │                 │ │                  │ │                │
+└─────────────────┘ └─────────────────┘ └──────────────────┘ └────────────────┘
 ```
+
+The **Executor Bot** is a separate HTTP service that holds signing keys for each vault's Gnosis Safe. The validator never signs Base L2 transactions directly; it sends JSON payloads to the executor, which builds and submits Safe multisends. Two endpoints today: `/execute_strategy` (mint/burn LP positions) and `/execute_swap` (`SnLiquidityManager.swap()` wrapped in a Safe multisend).
 
 ## Jobs-Based Architecture
 
@@ -44,90 +48,113 @@ A **Job** represents a liquidity management task for a specific vault and tradin
 Job {
     job_id: str                           # Unique identifier
     sn_liquidity_manager_address: str     # Vault managing liquidity
-    pair_address: str                     # Trading pair (e.g., ETH/USDC)
-    target: str                           # What is the target of the job.
+    pair_address: str                     # Pool address (e.g., WETH/USDC)
+    target: str                           # Target objective (currently "PoL")
     chain_id: int                         # 8453 for Base
-    round_duration_seconds: int           # Configurable (default: 900s = 15min)
+    round_duration_seconds: int           # Backtest replay length
     is_active: bool                       # Job enabled/disabled
+    is_staked: bool                       # If true, executor bot is told
+                                          # has_staking_enabled=True so the AK
+                                          # is auto-staked after execution.
+                                          # Toggled live by service/vault_monitor.
 }
 ```
 
 ### Parallel Job Execution
 
-The validator uses **asyncio** to run multiple jobs simultaneously:
+The validator uses **asyncio** to run all active jobs concurrently. Each job runs `run_job_continuously` (`validator/round_orchestrator.py`):
 
-```python
+```
 ┌──────────────────────────────────────────────────────────┐
 │              Validator Main Loop (Async)                 │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
-│  Job 1 (ETH/USDC)    Job 2 (WBTC/USDC)   Job 3 (AERO)    │
+│  Job 1 (ETH/USDC)    Job 2 (WBTC/USDC)   Job 3 (xTAO)    │
+│       │                    │                   │         │
+│       ├─ Vault filter      ├─ Vault filter     ├─ filter │
+│       │  (eligible miners) │                   │         │
 │       │                    │                   │         │
 │       ├─ Eval Round        ├─ Eval Round       ├─ Eval   │
-│       │  (All Miners)      │  (All Miners)     │         │
+│       │  (all eligible)    │                   │         │
 │       │                    │                   │         │
 │       ├─ Live Round        ├─ Live Round       ├─ Live   │
-│       │  (Winner)          │  (Winner)         │         │
+│       │  (winner only)     │                   │         │
 │       │                    │                   │         │
+│       ├─ sleep 4h ──────▶  │  sleep 4h ───▶    │  sleep  │
 │       ▼                    ▼                   ▼         │
-│   Concurrent               Concurrent          Concurrent│
-│   Every 15min              Every 15min         Every 15m │
 └──────────────────────────────────────────────────────────┘
 ```
 
+The 4-hour idle is a recent change to reduce RPC pressure (`run_job_continuously` calls `asyncio.sleep(4*60*60)` between cycles).
+
 ### Dual-Mode Operation
 
-Each job runs **two types of rounds simultaneously**:
+Each job cycle runs both round types in `asyncio.gather`:
 
-#### 1. Evaluation Mode (All Miners)
+#### 1. Evaluation Mode (all eligible miners)
 ```
-Purpose:     Test miner strategies in forward simulation
-Participants: ALL active miners
-Timeout:     60 seconds per miner response
-Duration:    Configurable (default: 15min)
-Evaluation:  Forward simulation from chainhead (current blockchain state)
-Scoring:     evaluation_score (EMA: 0.9×old + 0.1×new)
-Winner:      Best performing strategy → eligible for live
-```
-
-#### 2. Live Mode (Winner Only)
-```
-Purpose:     Execute real positions on-chain
-Participants: Previous evaluation round winner
-Requirement: 7+ days participation history
-Duration:    Same as evaluation (15min)
-Evaluation:  Actual on-chain performance over the round duration
-Scoring:     live_score (EMA: 0.7×old + 0.3×new)
-Weight:      Higher weight in combined score
+Purpose:      Score miner strategies in a forward backtest
+Participants: All miners that pass the vault-eligibility filter
+              (i.e., miners whose VaultRegistrationQuery returned a
+              recognised on-chain SnLiquidityManager).
+Replay:       Forward simulation from current chainhead, replaying
+              real swap events from base_poocl_swaps_v2.
+Cadence:      Strategy queried every `rebalance_check_interval` blocks
+              (default 100; configurable).
+EMA:          new_eval = 0.9 * old + 0.1 * latest
 ```
 
-**Combined Score:**
+#### 2. Live Mode (winner only)
+```
+Purpose:      Execute the winner's positions on-chain via the executor.
+Participants: The eval winner — IF they have ≥ MINER_ELIGIBILITY_DAYS of
+              consistent participation. Default 7 days, prod currently 1.
+Dispatch:     POST /execute_strategy on the executor bot with the
+              winner's `desired_positions`, `has_staking_enabled` flag,
+              and metadata.
+Failure:      Non-200 from executor or on-chain revert ⇒ score = -100.
+EMA:          new_live = 0.7 * old + 0.3 * latest
+```
+
+**Combined Score (used for ranking):**
 ```python
-combined_score = (evaluation_score × 0.6) + (live_score × 0.4)
+combined_score = (eval_score * 0.6) + (live_score * 0.4)
 ```
 
 ## Rebalance-Only Protocol
 
-The validator uses a **rebalance-only protocol** where:
+The validator uses a **rebalance-only protocol** with two synapses:
 
-1. **Validator runs forward simulation** starting from current chainhead (live blockchain state)
-2. **At regular checkpoints** (configurable interval), validator queries miners with RebalanceQuery:
-   ```python
-   # Request fields (sent by validator)
-   RebalanceQuery {
-       job_id: str
-       sn_liquidity_manager_address: str
-       pair_address: str
-       chain_id: int
-       round_id: str
-       round_type: str                   # 'evaluation' or 'live'
-       block_number: int
-       current_price: float
-       current_positions: List[Position]
-       inventory_remaining: Inventory
-       # ... other context
-   }
-   ```
+### `VaultRegistrationQuery`
+Sent once per discovery pass to any miner not yet present in the validator's vault registry. Miner must answer:
+```python
+VaultRegistrationQuery {
+    has_vault: bool          # True if miner manages an SnLiquidityManager
+    vault_address: str       # Address on `chain_id`
+    chain_id: int            # 8453 for Base
+}
+```
+Miners that answer `has_vault=False` (or fail to answer) are excluded from all subsequent `RebalanceQuery` rounds for that job.
+
+### `RebalanceQuery`
+Sent at every `rebalance_check_interval` block of the eval/live forward replay:
+```python
+# Request fields (sent by validator)
+RebalanceQuery {
+    job_id: str
+    sn_liquidity_manager_address: str
+    pair_address: str
+    chain_id: int
+    round_id: str
+    round_type: str                   # 'evaluation' or 'live'
+    block_number: int
+    current_price: float
+    current_positions: List[Position]
+    inventory_remaining: Optional[dict]   # {"amount0": str, "amount1": str}
+    rebalances_so_far: int
+    tick_spacing: int                     # for snapping desired ticks
+}
+```
 3. **Miners populate response fields on the same synapse:**
    ```python
    # Response fields (populated by miner)

@@ -25,20 +25,26 @@ RebalanceQuery {
     sn_liquidity_manager_address: str     # Vault address
     pair_address: str                     # Pool address (e.g., ETH/USDC)
     chain_id: int                         # 8453 for Base
-    round_id: str                         # Current round ID
+    round_id: str                         # Round identifier
     round_type: str                       # 'evaluation' or 'live'
 
     # Current state
     block_number: int                     # Current block in simulation
     current_price: float                  # Current price (token1/token0)
     current_positions: List[Position]     # Active LP positions
-    inventory_remaining: Inventory        # Available tokens
-
-    # Historical context
-    rebalances_so_far: int               # Number of rebalances in this round
-    # ... other context fields
+    inventory_remaining: Optional[dict]   # {"amount0": str, "amount1": str} idle tokens
+    rebalances_so_far: int                # Rebalances executed so far in this round
+    tick_spacing: int                     # Pool tick spacing — snap your tick_lower / tick_upper to this
 }
 ```
+
+`current_positions` and `desired_positions` are lists of `Position` objects:
+
+```python
+Position { tick_lower: int, tick_upper: int, allocation0: str, allocation1: str }
+```
+
+`allocation0` / `allocation1` are uint256 wei strings (use string to avoid JSON precision loss).
 
 ### What You Must Return
 
@@ -46,20 +52,45 @@ Populate these fields on the **same synapse**:
 
 ```python
 RebalanceQuery {
-    # Required fields (you populate these)
     accepted: bool                        # True to accept job, False to refuse
     refusal_reason: Optional[str]         # Reason if refusing
-    desired_positions: List[Position]     # Desired positions (required if accepted=True)
-                                          # Return current_positions to keep them unchanged
+    desired_positions: Optional[List[Position]]
+                                          # Required if accepted=True.
+                                          # Return current_positions to keep them unchanged.
+                                          # None reads as "no response / timeout" — penalised.
     miner_metadata: MinerMetadata         # Your version and model info
 }
 ```
 
+**Rebalance semantics:** the executor reconciles `desired_positions` against on-chain state with a 2% tick-tolerance. Existing positions whose ticks don't match any desired position (within 2%) are **burned**. New positions are minted from idle inventory. Returning `current_positions` unchanged is a no-op.
+
 ## Implementation Guide
+
+### Required handlers
+
+Your axon must serve **two** synapses:
+
+1. `RebalanceQuery` — strategy decisions (covered below).
+2. `VaultRegistrationQuery` — tells the validator which on-chain `SnLiquidityManager` (vault) you manage.
+
+Without `VaultRegistrationQuery`, the validator's vault-eligibility filter (`round_orchestrator.py`) will skip you for every job and you will never be queried for `RebalanceQuery`. **You will not earn.**
+
+```python
+# miner/miner.py
+from protocol.synapses import VaultRegistrationQuery
+
+async def vault_registration_handler(self, synapse: VaultRegistrationQuery) -> VaultRegistrationQuery:
+    synapse.has_vault = True
+    synapse.vault_address = self.vault_address      # your deployed SnLiquidityManager
+    synapse.chain_id = 8453                         # Base
+    return synapse
+```
+
+The reference miner deploys a vault at startup (or reads `MINER_VAULT_ADDRESSES` from `.env`). See `MINER_REGISTRATION_GUIDE.md`.
 
 ### Step 1: Basic Handler Structure
 
-The minimal miner handler looks like this:
+The minimal `RebalanceQuery` handler looks like this:
 
 ```python
 # miner/miner.py
@@ -148,251 +179,97 @@ This is where you compete!
 
 ## Understanding Scoring
 
-**⚠️ IMPORTANT: Current Scoring Mechanism (PoL Target)**
+Authoritative source: [`validator/services/scorer.py`](validator/services/scorer.py).
 
-This scoring function applies to the **current implementation** where all jobs use the **"PoL" (Protocol Owned Liquidity)** target. In the future, each job will have its own target type (e.g., "MaxFees", "MinIL", "Balanced"), and scoring will be determined by the job's specific target. For now, all jobs optimize for Protocol Owned Liquidity inventory protection.
+### The signal
 
----
-
-### The Scoring Function
-
-Your strategy is scored based on two critical factors:
-
-1. **Value Growth** - Maximize portfolio value based on pool price appreciation and fees (primary signal)
-2. **Inventory Protection** - Protect initial token amounts through exponential penalty for losses
-
-The algorithm uses a smooth exponential penalty that:
-- **Reduces positive gains** when inventory is lost
-- **Amplifies negative losses** when inventory is lost
-- **No penalty** when all tokens are preserved
-
-### How It Works
-
-#### 1. **Calculate Value Gain** (Primary Signal)
-```python
-# Initial value (in token1 units, at initial price)
-initial_value = (initial_amount0 × initial_price) + initial_amount1
-
-# Final value (in token1 units, at final price, including fees)
-final_value = (final_amount0 × final_price) + final_amount1 + fees
-
-# Value gain (can be positive or negative)
-value_gain = final_value - initial_value
-```
-- All values in token1 units using pool price
-- Includes all fees earned
-- This is your base score before penalty
-
-#### 2. **Measure Relative Inventory Losses**
-```python
-# Percentage of each token lost
-loss_ratio0 = (initial_amount0 - final_amount0) / initial_amount0
-loss_ratio1 = (initial_amount1 - final_amount1) / initial_amount1
-
-# Examples:
-# Lost 0 tokens → loss_ratio = 0.0 (0%)
-# Lost 10% of tokens → loss_ratio = 0.1 (10%)
-# Lost 50% of tokens → loss_ratio = 0.5 (50%)
-```
-- Measures **percentage** of initial inventory lost
-- Calculated separately for each token
-- Zero if token amount increased
-
-#### 3. **Aggregate Losses with Smooth-Max**
-```python
-# Smooth-max combines both loss ratios (like max but differentiable)
-inventory_loss_ratio = smooth_max(loss_ratio0, loss_ratio1)
-
-# Approximates max(loss_ratio0, loss_ratio1) but considers both
-```
-- Uses log-sum-exp aggregation
-- Focuses on the **worse** loss but considers both
-- Smooth and always rankable
-
-#### 4. **Apply Exponential Penalty**
-```python
-# Exponential penalty factor (default multiplier = 10)
-penalty_factor = exp(-10 × inventory_loss_ratio)
-
-# Examples:
-# 0% loss  → penalty_factor = exp(0) = 1.000 (no penalty)
-# 5% loss  → penalty_factor = exp(-0.5) ≈ 0.606
-# 10% loss → penalty_factor = exp(-1.0) ≈ 0.368
-# 20% loss → penalty_factor = exp(-2.0) ≈ 0.135
-# 50% loss → penalty_factor = exp(-5.0) ≈ 0.007
-```
-- Penalty grows **exponentially** with inventory loss
-- Even small losses create significant penalty
-- Large losses nearly eliminate your score
-
-#### 5. **Symmetric Penalty Application**
-```python
-if value_gain >= 0:
-    # Positive gains → multiply by penalty (reduces gain)
-    score = value_gain × penalty_factor
-else:
-    # Negative losses → divide by penalty (amplifies loss)
-    score = value_gain / penalty_factor
-```
-
-**Why symmetric?**
-- Losing inventory while gaining value → gain is reduced
-- Losing inventory while losing value → loss is amplified
-- Either way, inventory loss hurts!
-
-### Practical Examples
-
-#### Example 1: Perfect Strategy - No Inventory Loss ✅✅✅
-```python
-# Initial
-initial_amount0 = 1000 tokens
-initial_amount1 = 2000 tokens
-initial_value = $12,000
-
-# Final (no token losses!)
-final_amount0 = 1000 tokens  # Preserved ✅
-final_amount1 = 2000 tokens  # Preserved ✅
-final_value = $14,200 (includes $200 fees)
-
-# Scoring
-loss_ratio0 = 0.0
-loss_ratio1 = 0.0
-inventory_loss_ratio = 0.0
-penalty_factor = exp(0) = 1.0
-
-value_gain = 14,200 - 12,000 = 2,200
-score = 2,200 × 1.0 = 2,200 ✅✅✅
-```
-
-#### Example 2: Good Gains BUT Lost 10% of Token0 ⚠️
-```python
-# Initial
-initial_amount0 = 1000 tokens
-initial_amount1 = 2000 tokens
-initial_value = $12,000
-
-# Final (lost 10% of token0)
-final_amount0 = 900 tokens   # Lost 10%! ❌
-final_amount1 = 2000 tokens  # Preserved
-final_value = $15,800 (price up + fees)
-
-# Scoring
-loss_ratio0 = (1000 - 900) / 1000 = 0.1 (10%)
-loss_ratio1 = 0.0
-inventory_loss_ratio ≈ 0.1
-penalty_factor = exp(-10 × 0.1) = exp(-1) ≈ 0.368
-
-value_gain = 15,800 - 12,000 = 3,800
-score = 3,800 × 0.368 ≈ 1,398 ⚠️
-
-# Gained $3,800 but lost 10% tokens → score reduced by 63%!
-```
-
-#### Example 3: Lost Value AND Lost 10% Tokens ❌❌❌
-```python
-# Initial
-initial_amount0 = 1000 tokens
-initial_amount1 = 2000 tokens
-initial_value = $12,000
-
-# Final (bad all around)
-final_amount0 = 900 tokens   # Lost 10%! ❌
-final_amount1 = 2000 tokens
-final_value = $11,000 (price down)
-
-# Scoring
-loss_ratio0 = 0.1
-inventory_loss_ratio ≈ 0.1
-penalty_factor = exp(-1) ≈ 0.368
-
-value_gain = 11,000 - 12,000 = -1,000
-score = -1,000 / 0.368 ≈ -2,717 ❌❌❌
-
-# Lost $1,000 AND lost 10% tokens → loss amplified by 2.7x!
-```
-
-#### Example 4: Lost 50% of Tokens (Catastrophic) ☠️
-```python
-# Even with positive value gain
-loss_ratio = 0.5
-penalty_factor = exp(-10 × 0.5) = exp(-5) ≈ 0.0067
-
-value_gain = 5,000  # Good gain!
-score = 5,000 × 0.0067 ≈ 33.5 ☠️
-
-# $5,000 gain → reduced to $33 due to 50% inventory loss!
-```
-
-### Key Takeaways for Miners
-
-#### 1. **PROTECT YOUR INVENTORY** 🛡️
-- Even **5-10% token loss** severely impacts score
-- 10% loss → 63% score reduction
-- 50% loss → 99% score reduction
-- **Zero tolerance** for inventory loss!
-
-#### 2. **The Penalty is Exponential** 📉
-- Small losses (5%) → moderate penalty
-- Medium losses (10-20%) → severe penalty
-- Large losses (>30%) → catastrophic penalty
-- **Non-linear** - gets worse fast!
-
-#### 3. **Penalty Applies Both Ways** ⚔️
-- Gains + loss → gains reduced
-- Losses + inventory loss → losses amplified
-- **Double punishment** when both go wrong
-
-#### 4. **Focus on Preservation First** 🎯
-- Better to preserve inventory with small gain
-- Than to chase high gains and lose tokens
-- Wide ranges, conservative rebalancing
-- **Capital preservation >> aggressive fees**
-
-### Score Updates (Exponential Moving Average)
-
-Your scores are updated after each round using EMA:
+Score is a **relative return** clamped to a bounded range, multiplied by an inventory-loss penalty, optionally lifted by an in-range bonus.
 
 ```python
-# After evaluation round
-new_eval_score = old_eval_score × 0.9 + latest_score × 0.1
+# 1. Relative return vs initial
+return_pct = (final_value - initial_value) / initial_value
+return_pct = clamp(return_pct, -10.0, 10.0)
 
-# After live round (if eligible)
-new_live_score = old_live_score × 0.7 + latest_score × 0.3
+# 2. Loss penalty — prefers backtester-reported impermanent_loss,
+#    falls back to max(loss_ratio_token0, loss_ratio_token1).
+loss_ratio = metrics.get("impermanent_loss") or fallback_token_delta_loss
+penalty    = exp(-10.0 * loss_ratio)             # 10 = DEFAULT_LOSS_PENALTY
 
-# Combined score (used for ranking)
-combined_score = (eval_score × 0.6) + (live_score × 0.4)
+# 3. Symmetric: gains are scaled down by penalty, losses are amplified
+score = return_pct * penalty if return_pct >= 0 else return_pct / penalty
+
+# 4. Optional in-range bonus (DEFAULT_IN_RANGE_WEIGHT = 0.08)
+r = clamp(metrics.get("in_range_ratio", 0), 0, 1)
+score *= (1 - 0.08) + 0.08 * r
+
+# 5. Final clamp to JSON/DB-safe range
+score = clamp(score, SCORE_MIN=-100.0, SCORE_MAX=10.0)
 ```
 
-- **Recent performance matters more** (EMA gives higher weight to new results)
-- **Live rounds count more** than evaluation (0.4 vs 0.6 weight)
-- **Consistency pays off** - one bad round won't kill your score
+A failed live execution (executor bot returns non-200, on-chain revert) bypasses this and gets `score = -100`.
 
-### Future: Target-Based Scoring
+### Worked numbers
 
-In future versions, each job will specify its target optimization goal:
+| Scenario | return_pct | loss_ratio | penalty | in_range | raw | clamped |
+|---|---:|---:|---:|---:|---:|---:|
+| +5% return, 0 loss, 100% in-range | 0.05 | 0.00 | 1.000 | 1.0 | 0.0500 | 0.0500 |
+| +5% return, 0 loss, 50% in-range | 0.05 | 0.00 | 1.000 | 0.5 | 0.0480 | 0.0480 |
+| +5% return, 5% IL, 80% in-range | 0.05 | 0.05 | 0.607 | 0.8 | 0.0298 | 0.0298 |
+| +5% return, 10% IL, 80% in-range | 0.05 | 0.10 | 0.368 | 0.8 | 0.0181 | 0.0181 |
+| -5% return, 5% IL, 50% in-range | -0.05 | 0.05 | 0.607 | 0.5 | -0.0791 | -0.0791 |
+| -5% return, 10% IL, 50% in-range | -0.05 | 0.10 | 0.368 | 0.5 | -0.1305 | -0.1305 |
+| failed live execution | n/a | n/a | n/a | n/a | n/a | **-100** |
 
-- **"PoL"** (current): Protocol Owned Liquidity - maintain 50/50 balance
-- **"MaxFees"**: Maximize fee collection (may allow more imbalance)
-- **"MinIL"**: Minimize impermanent loss (wider ranges)
-- **"Balanced"**: Balance between fees and IL
+### Takeaways
 
-Miners will be able to specialize in different target types across jobs.
+- **The penalty multiplier is 10**, applied to the raw IL ratio (not a percentage). 5% IL ⇒ penalty=0.61, 10% IL ⇒ 0.37, 20% IL ⇒ 0.14.
+- **Penalty is symmetric.** Gains shrink, losses grow. Inventory loss hurts both directions.
+- **In-range bonus is small** (max +8% on score) — don't sacrifice IL to chase it.
+- **Scores live in `[-100, +10]`.** A round score of `1.0` is huge. A round score of `-100` is a failed execution.
+- **Miss/timeout/refusal** ⇒ `score=0` for the round (not `-100`). `-100` is reserved for accepted-then-failed.
+
+### Score updates (EMA) and ranking
+
+```python
+# Per validator round (authoritative: validator/repositories/job.py SCORE_UPDATE log line)
+new_eval_score = 0.9 * old_eval_score + 0.1 * latest_eval_score
+new_live_score = 0.7 * old_live_score + 0.3 * latest_live_score
+combined_score = 0.6 * eval_score + 0.4 * live_score
+```
+
+Recent rounds weigh more; live rounds weigh more than eval rounds. Self-monitoring tip — grep your validator logs for the canonical line:
+
+```
+[SCORE_UPDATE] miner=<uid> job=<job_id> eval=<x> live=<y> combined=<z> total_evals=<n> successful=<m> refusals=<r>
+```
+
+### Eligibility for live rounds
+
+A miner is only routed to **live execution** after `MINER_ELIGIBILITY_DAYS` of consistent evaluation participation (env var on the validator; default 7, **production currently runs at 1**). Until then, you only see evaluation rounds.
+
+## Round Cadence
+
+The validator runs both an **evaluation** and a **live** round per job, then sleeps for **4 hours** before the next pair (`validator/round_orchestrator.py:run_job_continuously`). One round pair takes ~10–15 min wallclock. So your miner will be queried roughly every 4 hours per job.
+
+Scoring updates happen on every round; live execution only happens once you're eligibility-cleared (see "Eligibility for live rounds" above).
 
 ## Running Your Miner
 
 ### 1. Setup
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
 
-# Set environment variables
 export WALLET_NAME=your_wallet
 export HOTKEY_NAME=your_hotkey
-export SUBTENSOR_NETWORK=finney  # or test/local
-export NETUID=98
+export SUBTENSOR_NETWORK=finney   # finney = mainnet, test = testnet
+export NETUID=98                  # 98 mainnet, 374 testnet
 
-# Optional: Historical data access
+# Vault you manage (required — see MINER_REGISTRATION_GUIDE.md)
+export MINER_VAULT_ADDRESSES='["0xYourLiquidityManagerAddress"]'
+export MINER_VAULT_CHAIN_ID=8453
+
+# Optional: historical pool-events DB for backtesting your strategy
 export DB_CONNECTION_STRING=postgresql+asyncpg://user:pass@host:port/pool_events
 ```
 
@@ -407,13 +284,15 @@ python -m miner.miner \
 ### 3. Monitor
 
 ```bash
-# Watch logs
 tail -f miner.log
-
-# Look for:
-# - RebalanceQuery received
-# - Your decisions (rebalance/keep)
-# - Any errors
 ```
+
+Look for:
+- `VaultRegistrationQuery` received and answered with `has_vault=True`
+- `RebalanceQuery` received per round
+- Your accept/refuse decisions and computed positions
+- Any axon errors
+
+To track your scores from the validator side, grep the validator logs for `[SCORE_UPDATE] miner=<your_uid>`.
 
 **Good luck and happy mining! 🚀**

@@ -1,10 +1,22 @@
-ThisThis is a comprehensive set of decisions that significantly streamlines the MVP development path for SN98. The choices made clarify the execution environment, data reliance, and scoring rules, allowing for precise specification generation.
+# SN98 MVP Code Specification
+
+> ⚠️ **STATUS: SUPERSEDED / LEGACY MVP DESIGN.**
+>
+> This document captures the original MVP plan: a Flask `/predict_strategy` HTTP endpoint, dual `inventory|position` Mode workflow, `0.7 × Performance + 0.3 × LP Alignment` scoring, etc. **None of this matches live code.**
+>
+> Live system today: bittensor synapse axon (`RebalanceQuery`, `VaultRegistrationQuery`), exponential-IL-penalty scorer, jobs orchestrator, executor bot. See [`MINER_GUIDE.md`](./MINER_GUIDE.md) and [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+>
+> Kept for historical context. Do not implement against this spec.
+
+---
+
+This is a comprehensive set of decisions that significantly streamlines the MVP development path for SN98. The choices made clarify the execution environment, data reliance, and scoring rules, allowing for precise specification generation.
 
 Based on the sources and the new team decisions, here is the complete technical specification for the Validator code and a sample implementation for a Miner, ready for your development team.
 
 ---
 
-# SN98 MVP Code Specification
+# SN98 MVP Code Specification (legacy)
 
 ## Part 1: Validator Code Specification
 

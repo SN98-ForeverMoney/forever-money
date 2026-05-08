@@ -7,34 +7,40 @@
 SN98 ForeverMoney is a Bittensor subnet that optimizes Uniswap V3 / Aerodrome liquidity provision through competitive AI strategies. Miners propose dynamic rebalancing decisions, validators evaluate performance through forward simulations, and winning strategies get executed on-chain on Base L2.
 
 **Key Features:**
-- **Jobs-Based Architecture** - Multiple liquidity pools managed concurrently
-- **Dual-Mode Operation** - Evaluation rounds (all miners) + Live rounds (winners only)
-- **Rebalance-Only Protocol** - Miners decide when and how to adjust positions
-- **Per-Job Reputation** - Miners build scores for specific trading pairs
-- **Participation Requirement** - Consistent performance needed for live execution (default: 7 days)
+- **Jobs-Based Architecture** — multiple liquidity pools managed concurrently
+- **Dual-Mode Operation** — evaluation rounds (all eligible miners) + live rounds (winners only)
+- **Rebalance-Only Protocol** — miners propose `desired_positions` per pool
+- **Per-Job Reputation** — EMA-weighted scores per trading pair
+- **Participation Gate** — `MINER_ELIGIBILITY_DAYS` of consistent eval performance before live execution (default 7; production currently runs at 1)
 
 ## Network Information
 
-- **Subnet ID**: 374 (Testnet) / 98 (Mainnet)
+- **Subnet ID**: 98 (mainnet) / 374 (testnet)
 - **Network**: Bittensor
-- **Protocol**: Uniswap V3 / Aerodrome
-- **Round Duration**: Configurable (e.g., 15 minutes)
-- **Live Eligibility**: Configurable (default: 7 days participation)
+- **Underlying protocol**: Uniswap V3 / Aerodrome on Base (chain `8453`)
+- **Round cadence**: one evaluation+live round pair per job, then **4-hour sleep** before the next pair (`validator/round_orchestrator.py:run_job_continuously`)
 
 ## How It Works
 
-Validators run multiple jobs (liquidity management tasks) concurrently. For each job:
+Validators run multiple jobs concurrently. Per job:
 
-1. **Evaluation Rounds** - All miners compete in forward simulations from current blockchain state
-2. **Live Rounds** - Winning miners (after eligible participation period) execute strategies on-chain
-3. **Scoring** - Miners scored on absolute inventory protection and value growth
-4. **Reputation** - Build per-job scores through exponential moving averages
+1. **Vault filtering** — only miners that report a registered on-chain `SnLiquidityManager` via `VaultRegistrationQuery` are eligible.
+2. **Evaluation round** — eligible miners receive `RebalanceQuery` over a forward backtest from current chainhead. Strategies are scored on simulated outcome.
+3. **Live round** — for eligibility-cleared miners, the winner's positions are dispatched to the executor bot (`/execute_strategy`) and minted on-chain via the vault's Safe.
+4. **Score update** — bounded relative-return score with IL penalty and in-range bonus, smoothed via EMA.
 
-**Current Scoring (PoL Target):**
-- Maximize value growth from pool price appreciation and fees (primary signal)
-- Smooth exponential penalty for losing inventory (% of tokens lost)
-- Score = value_gain × exp(-10 × loss%) if gaining, value_gain / exp(-10 × loss%) if losing
-- 10% inventory loss → 63% score reduction; 50% loss → 99% reduction
+**Scoring summary (PoL target — see [MINER_GUIDE.md](./MINER_GUIDE.md) for full math):**
+
+```
+return_pct = clamp((final - initial) / initial, -10, +10)
+penalty    = exp(-10 * impermanent_loss)             # IL ratio, not %
+score      = (return_pct * penalty) if return_pct >= 0 else (return_pct / penalty)
+score     *= 0.92 + 0.08 * in_range_ratio            # small in-range bonus
+score      = clamp(score, -100, +10)                 # JSON-safe bounds
+# Failed live execution short-circuits to score = -100.
+```
+
+10% IL ⇒ penalty 0.37; 20% IL ⇒ 0.14. Inventory loss is punished symmetrically (gains shrink, losses amplify).
 
 ## 🚀 Getting Started
 
@@ -81,7 +87,7 @@ Edit the `.env` file to match your network configuration (e.g., `NETUID`, `SUBTE
 
 ## ⛏️ Running a Miner
 
-**Getting Started:** Implement a `rebalance_query_handler` that responds to `RebalanceQuery` requests from validators. Accept/refuse jobs and return desired positions (rebalance or keep current). Build reputation through consistent participation for 7 days to become eligible for live execution.
+**Getting Started:** Implement two synapse handlers — `vault_registration_handler` (returns your `SnLiquidityManager` address; without this you are filtered out and never queried) and `rebalance_query_handler` (returns `desired_positions` for each `RebalanceQuery`). Build reputation through consistent eval-round participation; after `MINER_ELIGIBILITY_DAYS` you become eligible for live execution.
 
 1.  **Register your miner** (if not already registered):
     See [MINER_REGISTRATION_GUIDE.md](./MINER_REGISTRATION_GUIDE.md) for detailed instructions.
