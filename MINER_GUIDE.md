@@ -247,6 +247,67 @@ Recent rounds weigh more; live rounds weigh more than eval rounds. Self-monitori
 
 A miner is only routed to **live execution** after `MINER_ELIGIBILITY_DAYS` of consistent evaluation participation (env var on the validator; default 7, **production currently runs at 1**). Until then, you only see evaluation rounds.
 
+## Emissions
+
+Authoritative source: [`validator/services/emissions.py`](validator/services/emissions.py). Weights are set on-chain by `EmissionsService.set_weights_on_chain` once per tempo (~72 min on Base validator).
+
+### The two halves: burn vs miners
+
+Total subnet emissions per epoch are split into a **burn share** (sent to UID 0) and a **miner share** (distributed across earning miners). The split is driven by the actual revenue the validator's vaults produced in the **last 24 hours**:
+
+```python
+revenue_alpha     = vault_revenue_usd / alpha_twap_price       # 24h vault revenue, denominated in α
+total_emission_α  = sum(metagraph.emission)                    # what the subnet earns this epoch
+
+miner_ratio = min(profit_ratio, revenue_alpha / total_emission_α)
+burn_ratio  = 1 - miner_ratio
+```
+
+- `profit_ratio` (env `PROFIT_RATIO`, default `1.0`) caps how much of total emissions can flow to miners. With the default, miners can capture up to 100% of emissions when vault revenue exceeds total emissions in α terms.
+- **Unprofitable vaults (revenue ≤ 0): 100% burn.** Miners earn nothing that epoch.
+- **No alpha price / total emissions = 0: 100% burn** (fail-safe).
+
+This means the subnet only emits to miners when miners are actually generating real on-chain LP fees that flow back to the protocol's vaults. The more revenue, the more emission. The less revenue, the more burn.
+
+### Winner-takes-all per job
+
+Once `miner_ratio` is fixed, **only the single top miner per active job** is eligible for a slice of it. From `get_miner_aggregate_scores`:
+
+```python
+for job in active_jobs:
+    eligible = get_eligible_miners(job.job_id)   # already filtered by MINER_ELIGIBILITY_DAYS
+    top      = eligible[0]                        # ranked by combined_score (eval×0.6 + live×0.4)
+    aggregate[top.uid] += top.combined_score
+```
+
+- One miner can win multiple jobs; their `combined_score`s sum into a single per-miner weight contribution.
+- Second-place on every job ⇒ **zero emissions**. The system pays for being #1, not for participating.
+- Once aggregate scores are known, the miner share is distributed proportionally:
+
+```python
+miner_weight[uid] = (aggregate[uid] / total_aggregate) * miner_ratio
+weight[UID_0]     = burn_ratio
+```
+
+### What this incentivises
+
+1. **Compete on the jobs you can win, not all of them.** Specialising in 1–2 pairs where you are reliably #1 beats being mid-pack on 10.
+2. **Drive real LP revenue at the vault you manage.** Emissions track 24-hour vault revenue. If your strategy generates fees that exceed IL, the protocol books revenue and emissions flow back to miners. If it burns inventory, revenue dries up and emissions burn.
+3. **Bias toward inventory preservation.** Recall the scoring section: IL is exponentially penalised, and `score = -100` on failed live execution. These signals compound — a single bad live execution can knock you off #1 for that job for many tempos.
+4. **Stay eligible.** A miner that misses too many eval rounds drops out of `get_eligible_miners` and yields the #1 slot. Uptime > cleverness.
+5. **Don't try to game the burn.** Burn is decided by 24h vault revenue across **all** active vaults, not by your individual round outcome. You cannot push the split toward miners by gambling on one round — only sustained, real revenue moves it.
+
+Self-check from validator logs:
+
+```
+Emissions split: profit_ratio=1.00 revenue_usd=<X> alpha_price=<Y> revenue_alpha=<Z> total=<T> \
+                 miner_ratio=<m> burn_ratio=<b> miner_alpha=<...> burn_alpha=<...>
+Top miner for job <job_id>: uid=<uid>, score=<combined_score>
+Weight distribution: Burn (UID 0)=<bw>, Miner total=<mt>, Total=<1.0>
+```
+
+If `miner_ratio` is consistently small, vaults need more revenue (or the protocol needs to lower its emission rate). If it's at the `profit_ratio` cap, miners are extracting the maximum the protocol will pay.
+
 ## Round Cadence
 
 The validator runs both an **evaluation** and a **live** round per job, then sleeps for **4 hours** before the next pair (`validator/round_orchestrator.py:run_job_continuously`). One round pair takes ~10–15 min wallclock. So your miner will be queried roughly every 4 hours per job.
