@@ -4,7 +4,7 @@ Execute strategy on-chain via executor bot HTTP API.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -172,6 +172,148 @@ async def execute_strategy_onchain(
             job_repository, job, round_obj, miner_uid, positions, err_msg
         )
         return {"success": False, "execution_id": eid, "tx_hash": None, "error": err_msg}
+
+
+async def execute_swap_onchain(
+    config: Dict[str, Any],
+    *,
+    liquidity_manager_address: str,
+    ak_address: str,
+    amount_in: int,
+    is_buy: bool,
+    round_id: str,
+    sqrt_price_limit: int = 0,
+    min_amount_out: int = 0,
+    miner_uid: Optional[int] = None,
+    timeout: int = 180,
+) -> Dict[str, Any]:
+    """
+    Send a swap to the executor bot's /execute_swap endpoint.
+
+    Wraps SnLiquidityManager.swap into a Safe multisend tx. amount_in is read
+    from the AK's stash inside the vault; the bot serializes this with
+    /execute_strategy via a single in-process lock.
+
+    Returns:
+        Dict with success, tx_hash, safe_tx_hash, round_id, error.
+    """
+    executor_url = config.get("executor_bot_url")
+    if not executor_url:
+        logger.warning("No executor bot URL configured")
+        return {
+            "success": False,
+            "tx_hash": None,
+            "safe_tx_hash": None,
+            "round_id": round_id,
+            "error": "No executor bot URL configured",
+        }
+
+    payload = {
+        "api_key": config.get("executor_bot_api_key"),
+        "liquidity_manager_address": liquidity_manager_address,
+        "ak_address": ak_address,
+        "amount_in": str(amount_in),
+        "is_buy": bool(is_buy),
+        "sqrt_price_limit": str(sqrt_price_limit),
+        "min_amount_out": str(min_amount_out),
+        "round_id": round_id,
+    }
+    if miner_uid is not None:
+        payload["miner_uid"] = miner_uid
+
+    logger.info(
+        f"Executing swap: vault={liquidity_manager_address} ak={ak_address} "
+        f"amount_in={amount_in} is_buy={is_buy} sqrt_price_limit={sqrt_price_limit} "
+        f"min_amount_out={min_amount_out} round_id={round_id}"
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{executor_url.rstrip('/')}/execute_swap",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=float(timeout),
+            )
+
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except Exception as json_err:
+                logger.error(f"Swap response not JSON: {json_err}: {response.text}")
+                return {
+                    "success": False,
+                    "tx_hash": None,
+                    "safe_tx_hash": None,
+                    "round_id": round_id,
+                    "error": f"Invalid JSON in response: {json_err}",
+                }
+            tx_hash = data.get("tx_hash")
+            safe_tx_hash = data.get("safe_tx_hash")
+            error = data.get("error")
+            success = bool(data.get("success")) and error is None
+            if success:
+                logger.info(
+                    f"Swap recorded: round_id={round_id} tx_hash={tx_hash} "
+                    f"safe_tx_hash={safe_tx_hash}"
+                )
+            else:
+                logger.warning(
+                    f"Swap reported failure: round_id={round_id} error={error}"
+                )
+            return {
+                "success": success,
+                "tx_hash": tx_hash,
+                "safe_tx_hash": safe_tx_hash,
+                "round_id": round_id,
+                "error": error,
+            }
+
+        err_msg = f"Executor bot returned status {response.status_code}"
+        try:
+            if response.text:
+                err_msg += f": {response.text}"
+        except Exception as e:
+            logger.error(f"Failed to read response.text: {e}")
+        logger.error(
+            f"Swap execution failed: {err_msg} round_id={round_id} "
+            f"vault={liquidity_manager_address}"
+        )
+        return {
+            "success": False,
+            "tx_hash": None,
+            "safe_tx_hash": None,
+            "round_id": round_id,
+            "error": err_msg,
+        }
+
+    except httpx.HTTPError as e:
+        err_msg = f"HTTP client error: {e}"
+        logger.error(
+            f"Failed to send swap to executor bot: {err_msg} round_id={round_id}",
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "tx_hash": None,
+            "safe_tx_hash": None,
+            "round_id": round_id,
+            "error": err_msg,
+        }
+    except Exception as e:
+        err_msg = f"Unexpected error: {e}"
+        logger.error(
+            f"Unexpected error sending swap to executor bot: {err_msg} "
+            f"round_id={round_id}",
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "tx_hash": None,
+            "safe_tx_hash": None,
+            "round_id": round_id,
+            "error": err_msg,
+        }
 
 
 async def _create_failed_execution_async(
