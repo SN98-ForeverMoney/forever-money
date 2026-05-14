@@ -86,6 +86,7 @@ async def discover_vault_pool(vault_address: str, chain_id: int) -> Optional[str
         ("BID", "0xa1832f7F4e534aE557f9B5AB76dE54B1873e498B"),
         ("xTAO", "0xb99FBE68c8A0cC14bE8c1AF73DD4DfEA8a76aDD7"),
         ("xSN64", "0xbAdd3F2d84605032C1B2AD8cBebb4700Dcd9D7dE"),
+        ("xSN93", "0xE704DaB204248F4f887CBdfF5D0cE8d10f62326e"),
         ("USDbC", "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"),
         ("DAI", "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"),
     ]
@@ -169,8 +170,15 @@ class SN98Miner:
             vault: deque(maxlen=self.volatility_window)
             for vault in self.vault_addresses
         }
+        # Suppress rebalances whose new ticks are within this fractional tolerance
+        # of the existing position's tick width. Mirrors POL_standalone's gate so
+        # tiny edge-buffer crossings don't burn gas on near-identical positions.
+        self.position_drift_tolerance = get_env_variable(
+            "POSITION_DRIFT_TOLERANCE", float, 0.10
+        )
         logger.info(f"Width factor: {self.width_factor}")
         logger.info(f"Volatility window: {self.volatility_window}")
+        logger.info(f"Position drift tolerance: {self.position_drift_tolerance:.0%}")
 
         # Miner identity for DB tracking
         self.miner_hotkey = wallet.hotkey.ss58_address
@@ -284,8 +292,17 @@ class SN98Miner:
                 inventory=synapse.inventory_remaining,
             )
 
-            synapse.desired_positions = [new_pos]
-            logger.info(f"Proposing new position: [{new_pos.tick_lower}, {new_pos.tick_upper}]")
+            if synapse.current_positions and self._positions_within_drift_tolerance(
+                [new_pos], synapse.current_positions
+            ):
+                synapse.desired_positions = list(synapse.current_positions)
+                logger.info(
+                    f"New position [{new_pos.tick_lower}, {new_pos.tick_upper}] within "
+                    f"{self.position_drift_tolerance:.0%} of current, keeping current."
+                )
+            else:
+                synapse.desired_positions = [new_pos]
+                logger.info(f"Proposing new position: [{new_pos.tick_lower}, {new_pos.tick_upper}]")
         else:
             synapse.desired_positions = list(synapse.current_positions)
             logger.info("Keeping current positions.")
@@ -532,13 +549,22 @@ class SN98Miner:
                         vault_address, current_tick, tick_spacing, inv_dict
                     )
 
-                    if not current_positions or self._has_positions_changed(
+                    within_tolerance = current_positions and self._positions_within_drift_tolerance(
                         [new_position], current_positions
+                    )
+                    if not current_positions or (
+                        self._has_positions_changed([new_position], current_positions)
+                        and not within_tolerance
                     ):
                         execution_triggered = True
                         logger.info(
                             f"Vault {vault_address}: Executing new position "
                             f"[{new_position.tick_lower}, {new_position.tick_upper}]"
+                        )
+                    elif within_tolerance:
+                        logger.info(
+                            f"Vault {vault_address}: New position within "
+                            f"{self.position_drift_tolerance:.0%} of current, skipping."
                         )
                     else:
                         logger.info(f"Vault {vault_address}: Position unchanged, skipping.")
@@ -581,6 +607,28 @@ class SN98Miner:
                 return True
 
         return False
+
+    def _positions_within_drift_tolerance(
+        self, new_positions: List[Position], current_positions: List[Position]
+    ) -> bool:
+        """
+        True if every new position's ticks are within position_drift_tolerance
+        of the corresponding current position's tick width. Count mismatch =
+        not within tolerance (structural change).
+        """
+        if len(new_positions) != len(current_positions):
+            return False
+        for new, curr in zip(new_positions, current_positions):
+            curr_width = curr.tick_upper - curr.tick_lower
+            if curr_width <= 0:
+                return False
+            allowed = curr_width * self.position_drift_tolerance
+            if (
+                abs(new.tick_lower - curr.tick_lower) > allowed
+                or abs(new.tick_upper - curr.tick_upper) > allowed
+            ):
+                return False
+        return True
 
     def run(self):
         """Start the miner axon server."""
